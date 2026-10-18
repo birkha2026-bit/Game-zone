@@ -19,7 +19,6 @@
             height: 100vh;
             display: block;
         }
-        /* واجهة المستخدم والتحكم */
         #ui-layer {
             position: absolute;
             top: 0;
@@ -44,7 +43,6 @@
             text-shadow: 0 0 5px #00ffcc;
             pointer-events: auto;
         }
-        /* أزرار الهواتف المحمولة */
         .mobile-controls {
             position: absolute;
             bottom: 20px;
@@ -112,7 +110,6 @@
             box-shadow: 0 0 5px #ff0055;
         }
     </style>
-    <!-- استدعاء مكتبة Three.js للرسم ثلاثي الأبعاد -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 </head>
 <body>
@@ -138,7 +135,6 @@
     </div>
 
     <script>
-        // إعداد مشهد اللعبة باستخدام Three.js
         const container = document.getElementById('canvas-container');
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x050505);
@@ -150,7 +146,6 @@
         renderer.setPixelRatio(window.devicePixelRatio);
         container.appendChild(renderer.domElement);
 
-        // إضافة إضاءة نيون
         const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
         scene.add(ambientLight);
 
@@ -158,14 +153,12 @@
         pointLight.position.set(0, 10, 0);
         scene.add(pointLight);
 
-        // بناء خريطة افتراضية (Arena)
         const floorGeo = new THREE.PlaneGeometry(100, 100);
         const floorMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.8 });
         const floor = new THREE.Mesh(floorGeo, floorMat);
         floor.rotation.x = -Math.PI / 2;
         scene.add(floor);
 
-        // إضافة حواجز نيون عشوائية شبيهة بـ ev.io
         const boxMat = new THREE.MeshStandardMaterial({ color: 0x00ffcc, emissive: 0x004433 });
         for (let i = 0; i < 20; i++) {
             const size = Math.random() * 3 + 2;
@@ -179,16 +172,13 @@
             scene.add(box);
         }
 
-        // إعداد كاميرا اللاعب
         camera.position.set(0, 2, 10);
 
-        // متغيرات الحركة
         let moveForward = false;
         let moveBackward = false;
         let moveLeft = false;
         let moveRight = false;
 
-        // تحكم اللمس للهواتف
         const joyArea = document.getElementById('joyArea');
         const joyThumb = document.getElementById('joyThumb');
         let joyCenter = { x: 0, y: 0 };
@@ -235,26 +225,22 @@
             }
         });
 
-        // أزرار الأكشن (إطلاق نار وقفز)
         document.getElementById('btnJump').addEventListener('click', () => {
-            // حركة قفز بسيطة
             camera.position.y += 1.5;
             setTimeout(() => { camera.position.y -= 1.5; }, 300);
         });
 
         document.getElementById('btnShoot').addEventListener('click', () => {
-            // تأثير إطلاق النار
-            document.getElementById('crosshair.style.borderColor = '#00ffcc';
+            const crosshair = document.getElementById('crosshair');
+            crosshair.style.borderColor = '#00ffcc';
             setTimeout(() => {
-                document.getElementById('crosshair').style.borderColor = '#ff0055';
+                crosshair.style.borderColor = '#ff0055';
             }, 100);
         });
 
-        // حلقة التحديث المستمر للعبة (Game Loop)
         function animate() {
             requestAnimationFrame(animate);
 
-            // تحريك الكاميرا بناءً على المدخلات
             const speed = 0.1;
             if (moveForward) camera.translateZ(-speed);
             if (moveBackward) camera.translateZ(speed);
@@ -266,7 +252,6 @@
 
         animate();
 
-        // التوافق مع تغيير حجم الشاشة
         window.addEventListener('resize', () => {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
