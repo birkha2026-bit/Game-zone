@@ -1,8 +1,0 @@
-services:
-  - type: web
-    name: neon-fps-game
-    env: php
-    region: frankfurt
-    plan: free
-    buildCommand: ""
-    startCommand: "php -S 0.0.0.0:$PORT index.php"
