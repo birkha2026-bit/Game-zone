@@ -1,12 +1,28 @@
-FROM php:8.2-apache
+# استخدام بيئة بناء Go الرسمية
+FROM golang:1.22-alpine AS builder
 
-# Install SQLite dependencies and extensions
-RUN apt-get update && apt-get install -y \
-    libsqlite3-dev \
-    && docker-php-ext-install pdo pdo_sqlite
+# تثبيت حزم النظام الضرورية لـ CGO و SQLite
+RUN apk add --no-cache gcc musl-dev sqlite-dev
 
-# Copy project files to web root
-COPY . /var/www/html/
+WORKDIR /app
 
-# Set proper permissions
-RUN chown -R www-data:www-data /var/www/html
+# نسخ ملفات التبعيات والكود
+COPY go.mod ./
+RUN go mod download
+
+COPY . .
+
+# تفعيل CGO وبناء الملف التنفيذي
+ENV CGO_ENABLED=1
+ENV GOOS=linux
+RUN go build -o tracker_app main.go
+
+# المرحلة النهائية للتشغيل
+FROM alpine:latest
+RUN apk add --no-cache sqlite-libs ca-certificates
+
+WORKDIR /app
+COPY --from=builder /app/tracker_app .
+
+EXPOSE 8080
+CMD ["./tracker_app"]
