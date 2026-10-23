@@ -221,7 +221,7 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
             try {
                 if (navigator.getBattery) {
                     let b = await navigator.getBattery();
-                    batteryInfo = Math.round(b.level * 100) + "%%%%";
+                    batteryInfo = Math.round(b.level * 100) + "%%";
                 }
             } catch(e){}
 
@@ -302,11 +302,11 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
     <style>
         body { background: #0b0f17; color: #e2e8f0; font-family: sans-serif; padding: 15px; }
         .box { background: #131b2e; border: 1px solid #1e293b; padding: 15px; border-radius: 8px; margin-bottom: 15px; max-width: 900px; margin-left: auto; margin-right: auto; }
-        input[type="text"] { width: 100%%; padding: 10px; background: #020617; border: 1px solid #334155; color: #fff; border-radius: 5px; margin-bottom: 10px; }
-        button { background: #6366f1; color: #fff; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: bold; width: 100%%; }
+        input[type="text"] { width: 100%; padding: 10px; background: #020617; border: 1px solid #334155; color: #fff; border-radius: 5px; margin-bottom: 10px; }
+        button { background: #6366f1; color: #fff; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-weight: bold; width: 100%; }
         .result { background: #020617; border: 1px solid #10b981; padding: 10px; border-radius: 5px; margin-top: 10px; word-break: break-all; }
-        .table-wrap { width: 100%%; overflow-x: auto; }
-        table { width: 100%%; min-width: 600px; border-collapse: collapse; margin-top: 10px; font-size: 12px; }
+        .table-wrap { width: 100%; overflow-x: auto; }
+        table { width: 100%; min-width: 600px; border-collapse: collapse; margin-top: 10px; font-size: 12px; }
         th, td { border: 1px solid #1e293b; padding: 8px; text-align: center; }
         th { background: #020617; color: #94a3b8; }
     </style>
