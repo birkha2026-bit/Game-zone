@@ -14,5 +14,5 @@ RUN sed -i 's/80/${PORT}/g' /etc/apache2/sites-available/000-default.conf /etc/a
 # فتح المنفذ المطلوب
 EXPOSE 8080
 
-# تشغيل خادم Apache في الواجهة الأمامية
-CMD ["apache2-foregrond"]
+# تشغيل خادم Apache في الواجهة الأمامية (التعديل هنا)
+CMD ["apache2-foreground"]
