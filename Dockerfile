@@ -1,20 +1,18 @@
-FROM golang:1.22-alpine AS builder
+# استخدام صورة PHP الرسمية مع Apache
+FROM php:8.2-apache
 
-WORKDIR /app
+# نسخ ملفات المشروع إلى المجلد الافتراضي لخادم الـ Apache
+COPY . /var/www/html/
 
-# نسخ جميع الملفات أولاً لكي يتعرف المترجم على الحزم المستخدمة في الكود
-COPY . .
+# ضبط الصلاحيات المناسبة للملفات
+RUN chown -v -R www-data:www-data /var/www/html
 
-# جلب التبعيات وتوليد ملف go.sum تلقائياً
-RUN go mod tidy
+# Render يحدد البورت تلقائياً عبر متغير البيئة PORT، نقوم بضبط إعدادات الأباتشي ليستمع له
+ENV PORT=8080
+RUN sed -i 's/80/${PORT}/g' /etc/apache2/sites-available/000-default.conf /etc/apache2/ports.conf
 
-ENV CGO_ENABLED=0
-ENV GOOS=linux
-RUN go build -o tracker_app main.go
-
-FROM alpine:latest
-WORKDIR /app
-COPY --from=builder /app/tracker_app .
-
+# فتح المنفذ المطلوب
 EXPOSE 8080
-CMD ["./tracker_app"]
+
+# تشغيل خادم Apache في الواجهة الأمامية
+CMD ["apache2-foregrond"]
